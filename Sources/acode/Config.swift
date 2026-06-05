@@ -31,8 +31,13 @@ func makeProvider(model: String?, cfg: Config) -> any LLMProvider {
     return AnthropicProvider(configuredModel: resolved)
 }
 
-/// Registers the standard M0 tool set: read_file and run_shell.
+/// Registers the standard M2 tool set: read_file, list_files, grep, edit_file,
+/// run_shell. Each file tool jails its paths via ProjectJail internally.
+/// (Skills tools are added in M4.)
 func registerStandardTools(_ tools: inout ToolRegistry) {
     tools.register(ReadFileTool())
+    tools.register(ListFilesTool())
+    tools.register(GrepTool())
+    tools.register(EditFileTool())
     tools.register(RunShellTool())
 }
