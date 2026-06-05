@@ -25,3 +25,56 @@ import Testing
     #expect(result.output.contains("src/"))
     #expect(!result.output.contains(".git"))
 }
+
+@Test func test_grep_finds() async throws {
+    let dirName = "acode-grep-\(UUID().uuidString)"
+    let dir = URL(fileURLWithPath: ProjectJail.root).appendingPathComponent(dirName)
+    let fm = FileManager.default
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+
+    let token = "ZZUNIQUETOKEN42"
+    let body = "first line\nhas \(token) here\nthird line"
+    let fileName = "\(dirName)/file.txt"
+    try body.write(
+        to: URL(fileURLWithPath: ProjectJail.root).appendingPathComponent(fileName),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let tool = GrepTool()
+    let result = await tool.run(.object(["pattern": .string(token), "path": .string(dirName)]))
+
+    #expect(result.isError == false)
+    #expect(result.output.contains("\(fileName):2:"))
+    #expect(result.output.contains(token))
+}
+
+@Test func test_grep_caps() async throws {
+    let dirName = "acode-grepcap-\(UUID().uuidString)"
+    let dir = URL(fileURLWithPath: ProjectJail.root).appendingPathComponent(dirName)
+    let fm = FileManager.default
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+
+    let token = "CAPTOKEN"
+    var lines: [String] = []
+    for i in 0..<120 {
+        lines.append("line \(i) \(token)")
+    }
+    try lines.joined(separator: "\n").write(
+        to: dir.appendingPathComponent("many.txt"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let tool = GrepTool()
+    let result = await tool.run(.object(["pattern": .string(token), "path": .string(dirName)]))
+
+    #expect(result.isError == false)
+    let hitLines = result.output
+        .components(separatedBy: "\n")
+        .filter { $0.contains(token) }
+    #expect(hitLines.count <= 50)
+    #expect(result.output.contains("truncated"))
+}
