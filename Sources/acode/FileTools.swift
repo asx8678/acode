@@ -256,3 +256,135 @@ struct GrepTool: Tool {
         return path
     }
 }
+
+/// Creates or edits a file under the project root. Mutating, so it requires
+/// approval. Writes atomically and never throws (invariant B3).
+struct EditFileTool: Tool {
+    let requiresApproval = true
+
+    static var schema: ToolSchema {
+        ToolSchema(
+            name: "edit_file",
+            description: "Create or edit a file under the project root. Empty old_str creates the file.",
+            parameters: Schema.object(
+                [
+                    "path": (type: "string", description: "Path to the file, relative to the project root."),
+                    "old_str": (type: "string", description: "Exact text to replace. Empty or omitted creates/overwrites the file."),
+                    "new_str": (type: "string", description: "Replacement text (or the file's contents in create mode).")
+                ],
+                required: ["path", "new_str"]
+            )
+        )
+    }
+
+    func run(_ args: JSONValue) async -> ToolOutput {
+        guard let path = args["path"]?.stringValue else {
+            return ToolOutput(output: "Missing required argument: path.", isError: true)
+        }
+        guard let newStr = args["new_str"]?.stringValue else {
+            return ToolOutput(output: "Missing required argument: new_str.", isError: true)
+        }
+        let oldStr = args["old_str"]?.stringValue ?? ""
+
+        do {
+            let url = try ProjectJail.resolve(path)
+            let fileExists = FileManager.default.fileExists(atPath: url.path)
+
+            // Create mode: missing file or empty old_str.
+            if !fileExists || oldStr.isEmpty {
+                try Self.atomicWrite(newStr, to: url)
+                return ToolOutput(output: "Wrote \(path) (\(newStr.count) bytes).")
+            }
+
+            let content = try String(contentsOf: url, encoding: .utf8)
+            let exactCount = Self.countOccurrences(of: oldStr, in: content)
+
+            if exactCount == 1 {
+                let updated = content.replacingOccurrences(of: oldStr, with: newStr)
+                try Self.atomicWrite(updated, to: url)
+                return ToolOutput(output: "Edited \(path).")
+            }
+            if exactCount > 1 {
+                return ToolOutput(
+                    output: "old_str must match exactly once; found \(exactCount) occurrences in \(path).",
+                    isError: true
+                )
+            }
+
+            // Zero exact matches: whitespace-normalized line fallback (D4).
+            if let updated = Self.normalizedReplace(oldStr: oldStr, newStr: newStr, in: content) {
+                try Self.atomicWrite(updated, to: url)
+                return ToolOutput(output: "Edited \(path) (normalized match).")
+            }
+            return ToolOutput(
+                output: "old_str must match exactly once; found 0 occurrences in \(path) (including a whitespace-normalized retry).",
+                isError: true
+            )
+        } catch {
+            return ToolOutput(output: "Could not edit \(path): \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Counts non-overlapping occurrences of `needle` in `haystack`.
+    private nonisolated static func countOccurrences(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var searchStart = haystack.startIndex
+        while let found = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        return count
+    }
+
+    /// Normalizes a line: collapse all whitespace runs to single spaces and trim.
+    private nonisolated static func normalize(_ line: String) -> String {
+        line.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
+    }
+
+    /// Attempts a line-window replacement using whitespace-normalized matching.
+    /// Returns the updated content only when exactly one window matches.
+    private nonisolated static func normalizedReplace(oldStr: String, newStr: String, in content: String) -> String? {
+        let fileLines = content.components(separatedBy: "\n")
+        let oldLines = oldStr.components(separatedBy: "\n")
+        guard !oldLines.isEmpty, oldLines.count <= fileLines.count else { return nil }
+
+        let normFile = fileLines.map(normalize)
+        let normOld = oldLines.map(normalize)
+
+        var matchStarts: [Int] = []
+        for start in 0...(fileLines.count - oldLines.count) {
+            if Array(normFile[start..<start + oldLines.count]) == normOld {
+                matchStarts.append(start)
+            }
+        }
+        guard matchStarts.count == 1, let start = matchStarts.first else { return nil }
+
+        var updatedLines = fileLines
+        updatedLines.replaceSubrange(
+            start..<start + oldLines.count,
+            with: newStr.components(separatedBy: "\n")
+        )
+        return updatedLines.joined(separator: "\n")
+    }
+
+    /// Writes `content` atomically via a same-directory temp file and rename,
+    /// creating parent directories and cleaning up the temp on failure.
+    private nonisolated static func atomicWrite(_ content: String, to url: URL) throws {
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let temp = directory.appendingPathComponent(".acode-tmp-\(UUID().uuidString)")
+        do {
+            try content.write(to: temp, atomically: false, encoding: .utf8)
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: temp)
+            } else {
+                try fm.moveItem(at: temp, to: url)
+            }
+        } catch {
+            try? fm.removeItem(at: temp)
+            throw error
+        }
+    }
+}
