@@ -27,7 +27,7 @@ enum Message: Sendable {
 }
 
 /// A minimal JSON value model used for tool arguments and JSON-Schema fragments.
-enum JSONValue: Codable, Sendable, Equatable {
+nonisolated enum JSONValue: Codable, Sendable, Equatable {
     case null
     case bool(Bool)
     case number(Double)
