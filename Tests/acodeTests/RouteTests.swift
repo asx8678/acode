@@ -21,6 +21,14 @@ import Testing
     #expect(t == "fix the bug")
 }
 
+@Test func test_plan_slash() {
+    guard case .slash(let s) = route("/plan build a website") else {
+        Issue.record("Expected /plan build a website to route to .slash.")
+        return
+    }
+    #expect(s == "plan build a website")
+}
+
 @Test func test_model_slash() {
     guard case .slash(let s) = route("/model gpt-5") else {
         Issue.record("Expected /model gpt-5 to route to .slash.")

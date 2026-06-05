@@ -89,19 +89,34 @@ struct Acode: AsyncParsableCommand {
     mutating func run() async throws {
         // No prompt: enter the interactive REPL.
         guard let prompt else {
-            await Self.runREPL(model: model, yes: yes, verbose: verbose)
+            await Self.runREPL(model: model, yes: yes, verbose: verbose, agents: agents)
             return
         }
 
         // One-shot: the provider throws `missingAPIKey` when a key is required,
         // so configuration is left to the provider (local providers need none).
-        _ = try await Self.executeOneShot(prompt: prompt, model: model, yes: yes, verbose: verbose)
+        if !agents.isEmpty {
+            _ = try await Self.executeOrchestrated(prompt: prompt, model: model, yes: yes, verbose: verbose, agents: agents)
+        } else {
+            _ = try await Self.executeOneShot(prompt: prompt, model: model, yes: yes, verbose: verbose)
+        }
+    }
+
+    /// Maps an agent name string to a profile.
+    @MainActor
+    private static func profile(for name: String) -> AgentProfile {
+        switch name.lowercased() {
+        case "plan", "planner": return .planner
+        case "code", "coder": return .coder
+        case "review", "reviewer": return .reviewer
+        default: return .generalist
+        }
     }
 
     /// The interactive read-eval-print loop. Slash and shell commands work
     /// without an API key; only model turns require one.
     @MainActor
-    private static func runREPL(model: String?, yes: Bool, verbose: Bool) async {
+    private static func runREPL(model: String?, yes: Bool, verbose: Bool, agents: [String]) async {
         print("acode \(version)")
 
         let cfg = Config.load()
@@ -132,14 +147,30 @@ struct Acode: AsyncParsableCommand {
             case .slash(let command):
                 switch command {
                 case "help":
-                    print("Commands: /help, /clear, /model [name], /quit. Prefix ! to run a shell command; anything else is a task.")
+                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>. Prefix ! to run a shell command; anything else is a task.")
                 case "clear":
                     agent.reset()
                     print("Conversation history cleared.")
                 case "quit":
                     break loop
                 default:
-                    if command == "model" || command.hasPrefix("model ") {
+                    if command == "plan" || command.hasPrefix("plan ") {
+                        let task = command.dropFirst("plan".count).trimmingCharacters(in: .whitespaces)
+                        if task.isEmpty {
+                            print("Usage: /plan <task description>")
+                        } else {
+                            let orchestrator = Orchestrator()
+                            await runCancellable({
+                                let result = try await orchestrator.run(
+                                    task: task,
+                                    provider: provider,
+                                    tools: tools,
+                                    renderer: renderer
+                                )
+                                print(result)
+                            }, renderer: renderer)
+                        }
+                    } else if command == "model" || command.hasPrefix("model ") {
                         let name = command.dropFirst("model".count).trimmingCharacters(in: .whitespaces)
                         if name.isEmpty {
                             print("Current model: \(resolvedModel).")
@@ -187,5 +218,48 @@ struct Acode: AsyncParsableCommand {
         renderer.verboseLog("Model: \(resolvedModel)")
         renderer.verboseLog("Provider: \(providerName(provider))")
         return try await runOneShot(prompt: prompt, provider: provider, tools: tools, renderer: renderer)
+    }
+
+    /// Builds the runtime and runs one prompt through the multi-agent
+    /// orchestrator. Used when `--agents` is specified.
+    @MainActor
+    private static func executeOrchestrated(
+        prompt: String,
+        model: String?,
+        yes: Bool,
+        verbose: Bool,
+        agents: [String]
+    ) async throws -> String {
+        let cfg = Config.load()
+        var tools = ToolRegistry()
+        registerStandardTools(&tools)
+        let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
+        let provider = makeProvider(model: model, cfg: cfg)
+        let color = Renderer.colorEnabled(
+            isTTY: isatty(STDOUT_FILENO) != 0,
+            noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
+        )
+        let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        renderer.verboseLog("Model: \(resolvedModel)")
+        renderer.verboseLog("Provider: \(providerName(provider))")
+
+        // Map agent names to profiles. Unknown names default to generalist.
+        let profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile)
+        if agents.count >= 3 {
+            profiles = (profile(for: agents[0]), profile(for: agents[1]), profile(for: agents[2]))
+        } else if agents.count == 2 {
+            profiles = (profile(for: agents[0]), profile(for: agents[1]), .reviewer)
+        } else {
+            profiles = (profile(for: agents[0]), .coder, .reviewer)
+        }
+
+        let orchestrator = Orchestrator()
+        return try await orchestrator.run(
+            task: prompt,
+            provider: provider,
+            tools: tools,
+            renderer: renderer,
+            profiles: profiles
+        )
     }
 }
