@@ -15,9 +15,57 @@ func runOneShot(
     return try await agent.run(prompt)
 }
 
+/// A routed line of REPL input.
+nonisolated enum Input {
+    case slash(String)
+    case shell(String)
+    case task(String)
+}
+
+/// Routes a REPL line: leading `/` -> slash, leading `!` -> shell, else task.
+/// Only the single leading marker is stripped; task keeps the full text.
+nonisolated func route(_ s: String) -> Input {
+    let trimmed = s.trimmingCharacters(in: .whitespaces)
+    if trimmed.hasPrefix("/") {
+        return .slash(String(trimmed.dropFirst()))
+    }
+    if trimmed.hasPrefix("!") {
+        return .shell(String(trimmed.dropFirst()))
+    }
+    return .task(s)
+}
+
+/// Runs `work` in a child task while SIGINT cancels just that task, so Ctrl-C
+/// interrupts the current turn and returns to the prompt without killing the
+/// process. Reused by the M5 orchestrator.
+@MainActor
+func runCancellable(_ work: @escaping () async throws -> Void, renderer: Renderer) async {
+    let task = Task { try await work() }
+
+    // Suppress default termination and route SIGINT to task cancellation.
+    let previous = signal(SIGINT, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    source.setEventHandler { task.cancel() }
+    source.resume()
+    defer {
+        source.cancel()
+        signal(SIGINT, previous)
+    }
+
+    do {
+        try await task.value
+    } catch is CancellationError {
+        renderer.endAssistant()
+        print("Cancelled.")
+    } catch {
+        renderer.endAssistant()
+        print("Error: \(error)")
+    }
+}
+
 /// Entry point for the acode terminal coding agent.
 ///
-/// Supports one-shot mode (`-p`); the interactive REPL is T1.4.
+/// Supports one-shot mode (`-p`) and an interactive REPL.
 @main
 struct Acode: AsyncParsableCommand {
     @Option(name: .shortAndLong) var model: String?
@@ -29,21 +77,83 @@ struct Acode: AsyncParsableCommand {
     /// The acode release version, surfaced in the startup banner.
     nonisolated static let version = "0.1.0"
 
+    /// The neutral, sentence-case message shown when the API key is missing.
+    nonisolated static let missingKeyMessage = "Set ANTHROPIC_API_KEY to use acode."
+
+    private nonisolated static func apiKeyMissing() -> Bool {
+        let key = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"]
+        return key == nil || key?.isEmpty == true
+    }
+
     mutating func run() async throws {
-        // No prompt: print the banner and exit. Interactive REPL is T1.4.
+        // No prompt: enter the interactive REPL.
         guard let prompt else {
-            print("acode \(Acode.version)")
+            await Self.runREPL(model: model, yes: yes, verbose: verbose)
             return
         }
 
-        // UX guard: a missing key should not become a crash.
-        let key = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"]
-        if key == nil || key?.isEmpty == true {
-            FileHandle.standardError.write(Data("Set ANTHROPIC_API_KEY to use acode.\n".utf8))
+        // One-shot: a missing key should not become a crash.
+        if Self.apiKeyMissing() {
+            FileHandle.standardError.write(Data((Self.missingKeyMessage + "\n").utf8))
             throw ExitCode.failure
         }
 
         _ = try await Self.executeOneShot(prompt: prompt, model: model, yes: yes, verbose: verbose)
+    }
+
+    /// The interactive read-eval-print loop. Slash and shell commands work
+    /// without an API key; only model turns require one.
+    @MainActor
+    private static func runREPL(model: String?, yes: Bool, verbose: Bool) async {
+        print("acode \(version)")
+
+        let cfg = Config.load()
+        var tools = ToolRegistry()
+        registerStandardTools(&tools)
+        let provider = makeProvider(model: model, cfg: cfg)
+        let color = Renderer.colorEnabled(
+            isTTY: isatty(STDOUT_FILENO) != 0,
+            noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
+        )
+        let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: renderer)
+
+        loop: while true {
+            print("> ", terminator: "")
+            guard let line = readLine() else {
+                print("")
+                break
+            }
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                continue
+            }
+
+            switch route(line) {
+            case .slash(let command):
+                switch command {
+                case "help":
+                    print("Commands: /help, /clear, /quit. Prefix ! to run a shell command; anything else is a task.")
+                case "clear":
+                    agent.reset()
+                    print("Conversation history cleared.")
+                case "quit":
+                    break loop
+                default:
+                    print("Unknown command: /\(command)")
+                }
+
+            case .shell(let command):
+                let result = await RunShellTool.execute(command: command, timeout: 60)
+                print(result.output)
+
+            case .task(let text):
+                if apiKeyMissing() {
+                    print(missingKeyMessage)
+                    continue
+                }
+                await runCancellable({ try await agent.run(text) }, renderer: renderer)
+            }
+        }
     }
 
     /// Builds the runtime and runs one prompt. MainActor-isolated so the
