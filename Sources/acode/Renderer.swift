@@ -89,6 +89,41 @@ struct Renderer: Sendable {
         }
     }
 
+    /// Writes a redacted diagnostic line to stderr when verbose is enabled.
+    nonisolated func verboseLog(_ message: String) {
+        guard verbose else { return }
+        let redacted = Self.redactKeys(in: message)
+        FileHandle.standardError.write(Data((redacted + "\n").utf8))
+    }
+
+    /// Masks anything that looks like an API key with `[REDACTED]`.
+    ///
+    /// Redacts Anthropic/OpenAI-style keys (`sk-ant-…`, `sk-…`) and the values
+    /// of JSON/header pairs whose key contains `key` or `api_key`.
+    nonisolated static func redactKeys(in text: String) -> String {
+        var result = text
+
+        // 1) Mask the value of JSON/header pairs whose key name ends in "key".
+        //    Keep the key name; replace only the quoted value.
+        let pairPattern = "(?i)(\"[a-z0-9_-]*key\"\\s*:\\s*)\"[^\"]*\""
+        if let regex = try? NSRegularExpression(pattern: pairPattern) {
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = regex.stringByReplacingMatches(
+                in: result, range: range, withTemplate: "$1\"[REDACTED]\""
+            )
+        }
+
+        // 2) Mask bare Anthropic/OpenAI-style secret keys anywhere.
+        for pattern in ["sk-ant-[a-zA-Z0-9_-]+", "sk-[a-zA-Z0-9_-]{20,}"] {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = regex.stringByReplacingMatches(
+                in: result, range: range, withTemplate: "[REDACTED]"
+            )
+        }
+        return result
+    }
+
     /// Prints token usage only when verbose.
     nonisolated func usage(_ u: Usage) {
         guard verbose else { return }

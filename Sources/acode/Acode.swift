@@ -110,12 +110,15 @@ struct Acode: AsyncParsableCommand {
         let cfg = Config.load()
         var tools = ToolRegistry()
         registerStandardTools(&tools)
+        let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
         let provider = makeProvider(model: model, cfg: cfg)
         let color = Renderer.colorEnabled(
             isTTY: isatty(STDOUT_FILENO) != 0,
             noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
         )
         let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        renderer.verboseLog("Model: \(resolvedModel)")
+        renderer.verboseLog("Provider: Anthropic")
         let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: renderer)
 
         loop: while true {
@@ -168,12 +171,15 @@ struct Acode: AsyncParsableCommand {
         let cfg = Config.load()
         var tools = ToolRegistry()
         registerStandardTools(&tools)
+        let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
         let provider = makeProvider(model: model, cfg: cfg)
         let color = Renderer.colorEnabled(
             isTTY: isatty(STDOUT_FILENO) != 0,
             noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
         )
         let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        renderer.verboseLog("Model: \(resolvedModel)")
+        renderer.verboseLog("Provider: Anthropic")
         return try await runOneShot(prompt: prompt, provider: provider, tools: tools, renderer: renderer)
     }
 }

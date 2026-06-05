@@ -99,6 +99,8 @@ final class Agent {
             let system = Prompt.assemble(profile: profile, registry: tools)
             let schemas = tools.schemas(allowed: profile.tools)
 
+            renderer.verboseLog("Request: \(history.count) messages, \(schemas.count) tools")
+
             let stream = try await connectWithRetry(max: 3) {
                 try await provider.stream(
                     system: system,
