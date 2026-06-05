@@ -2,13 +2,34 @@ import Foundation
 import Testing
 @testable import acode
 
-/// A test double that replays a scripted sequence of stream events in order.
-final class FakeProvider: LLMProvider {
+/// A test double that replays scripted stream events.
+///
+/// Three modes: a single script, a queue of per-call scripts (consumed in
+/// order), or a repeating script yielded on every call (for the step-limit test).
+nonisolated final class FakeProvider: LLMProvider, @unchecked Sendable {
     let contextWindow: Int
-    private let script: [StreamEvent]
+    private let lock = NSLock()
+    private var queue: [[StreamEvent]]
+    private let repeatScript: [StreamEvent]?
 
+    /// Single-script mode (yielded once).
     init(script: [StreamEvent], contextWindow: Int = 200_000) {
-        self.script = script
+        self.queue = [script]
+        self.repeatScript = nil
+        self.contextWindow = contextWindow
+    }
+
+    /// Queue mode: each `stream(...)` call consumes the next script in order.
+    init(scripts: [[StreamEvent]], contextWindow: Int = 200_000) {
+        self.queue = scripts
+        self.repeatScript = nil
+        self.contextWindow = contextWindow
+    }
+
+    /// Repeat mode: the same script is yielded on every call.
+    init(repeating: [StreamEvent], contextWindow: Int = 200_000) {
+        self.queue = []
+        self.repeatScript = repeating
         self.contextWindow = contextWindow
     }
 
@@ -18,9 +39,17 @@ final class FakeProvider: LLMProvider {
         tools: [ToolSchema],
         model: String?
     ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        let script = self.script
+        let next: [StreamEvent] = lock.withLock {
+            if let repeatScript {
+                return repeatScript
+            } else if !queue.isEmpty {
+                return queue.removeFirst()
+            } else {
+                return []
+            }
+        }
         return AsyncThrowingStream { continuation in
-            for event in script {
+            for event in next {
                 continuation.yield(event)
             }
             continuation.finish()
