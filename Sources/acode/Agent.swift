@@ -82,7 +82,7 @@ func connectWithRetry<T>(max: Int, _ make: () async throws -> T) async throws ->
 /// Drives the act -> observe -> re-decide loop for one conversation.
 @MainActor
 final class Agent {
-    private let profile: AgentProfile
+    private var profile: AgentProfile
     private var provider: any LLMProvider
     private let tools: ToolRegistry
     private let renderer: Renderer
@@ -98,6 +98,12 @@ final class Agent {
     /// Swaps the active provider mid-session (used by the `/model` command).
     func switchProvider(_ newProvider: any LLMProvider) {
         provider = newProvider
+    }
+
+    /// Swaps the active profile mid-session (used by the orchestrator to reuse
+    /// a single agent across planner/coder/reviewer phases).
+    func switchProfile(_ newProfile: AgentProfile) {
+        profile = newProfile
     }
 
     /// Clears the conversation history.
