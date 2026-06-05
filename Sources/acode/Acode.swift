@@ -79,11 +79,17 @@ struct Acode: AsyncParsableCommand {
 
     /// Human-readable name for the active provider, used in verbose logs.
     private nonisolated static func providerName(_ provider: any LLMProvider) -> String {
-        if let openAI = provider as? OpenAIProvider,
-           openAI.baseURL != defaultOpenAIBaseURL {
-            return "Local"
+        if let openAI = provider as? OpenAIProvider {
+            if openAI.baseURL == defaultOpenAIBaseURL {
+                return "OpenAI"
+            }
+            // Show the host for custom endpoints (DeepSeek, local, etc.)
+            if let host = URL(string: openAI.baseURL)?.host {
+                return host
+            }
+            return "Custom"
         }
-        return provider is OpenAIProvider ? "OpenAI" : "Anthropic"
+        return "Anthropic"
     }
 
     mutating func run() async throws {

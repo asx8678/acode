@@ -42,15 +42,9 @@ struct OpenAIProvider: LLMProvider {
         tools: [ToolSchema],
         model: String?
     ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        let key: String?
-        if isDefaultEndpoint {
-            guard let envKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !envKey.isEmpty else {
-                throw OpenAIError.missingAPIKey
-            }
-            key = envKey
-        } else {
-            // Local OpenAI-compatible servers typically need no auth.
-            key = nil
+        let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"].flatMap { $0.isEmpty ? nil : $0 }
+        if isDefaultEndpoint && key == nil {
+            throw OpenAIError.missingAPIKey
         }
 
         let resolvedModel = model ?? configuredModel
