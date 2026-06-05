@@ -129,7 +129,7 @@ struct AnthropicProvider: LLMProvider {
             [
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": jsonValueToAny(tool.parameters)
+                "input_schema": tool.parameters.anyValue
             ] as [String: Any]
         }
         if !toolBlocks.isEmpty {
@@ -164,7 +164,7 @@ struct AnthropicProvider: LLMProvider {
                     "type": "tool_use",
                     "id": call.id,
                     "name": call.name,
-                    "input": jsonValueToAny(call.arguments)
+                    "input": call.arguments.anyValue
                 ])
             }
             return ["role": "assistant", "content": content]
@@ -181,22 +181,4 @@ struct AnthropicProvider: LLMProvider {
         }
     }
 
-    // MARK: - JSONValue bridging
-
-    private nonisolated static func jsonValueToAny(_ value: JSONValue) -> Any {
-        switch value {
-        case .null:
-            return NSNull()
-        case .bool(let b):
-            return b
-        case .number(let n):
-            return n
-        case .string(let s):
-            return s
-        case .array(let arr):
-            return arr.map(jsonValueToAny)
-        case .object(let obj):
-            return obj.mapValues(jsonValueToAny)
-        }
-    }
 }

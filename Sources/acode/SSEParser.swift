@@ -77,7 +77,7 @@ nonisolated final class ResponseAssembler {
             else {
                 return []
             }
-            let arguments = Self.parseArguments(block.partialJSON)
+            let arguments = JSONValue.parseArguments(block.partialJSON)
             return [.toolCall(ToolCall(id: id, name: name, arguments: arguments))]
 
         case "message_delta":
@@ -97,17 +97,4 @@ nonisolated final class ResponseAssembler {
         }
     }
 
-    /// Parses an accumulated partial-JSON tool-input buffer into a JSONValue,
-    /// falling back to an empty object on failure or empty input.
-    private static func parseArguments(_ buffer: String) -> JSONValue {
-        let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard
-            !trimmed.isEmpty,
-            let data = trimmed.data(using: .utf8),
-            let value = try? JSONDecoder().decode(JSONValue.self, from: data)
-        else {
-            return .object([:])
-        }
-        return value
-    }
 }

@@ -17,10 +17,17 @@ private nonisolated let retryableStatusCodes: Set<Int> = [429, 500, 502, 503, 52
 /// Returns `nil` for non-HTTP errors (e.g. transport failures), which are
 /// treated as transient and therefore retriable.
 private func httpStatus(of error: Error) -> Int? {
-    if case AnthropicError.httpStatus(let code) = error {
-        return code
-    }
+    if case AnthropicError.httpStatus(let code) = error { return code }
+    if case OpenAIError.httpStatus(let code) = error { return code }
     return nil
+}
+
+/// True for permanent configuration errors that must never be retried,
+/// alongside `CancellationError` (invariant B7).
+private func isPermanentConfigError(_ error: Error) -> Bool {
+    if case AnthropicError.missingAPIKey = error { return true }
+    if case OpenAIError.missingAPIKey = error { return true }
+    return false
 }
 
 /// Attempts `make()` up to `max` times with exponential backoff and full
@@ -44,6 +51,11 @@ func connectWithRetry<T>(max: Int, _ make: () async throws -> T) async throws ->
             throw CancellationError()
         } catch {
             lastError = error
+
+            // Permanent configuration errors fail fast (never retried).
+            if isPermanentConfigError(error) {
+                throw error
+            }
 
             // HTTP errors outside the retryable set fail fast.
             if let status = httpStatus(of: error), !retryableStatusCodes.contains(status) {

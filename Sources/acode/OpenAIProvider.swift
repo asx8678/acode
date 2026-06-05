@@ -148,7 +148,7 @@ struct OpenAIProvider: LLMProvider {
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": jsonValueToAny(tool.parameters)
+                "parameters": tool.parameters.anyValue
             ] as [String: Any]
         }
 
@@ -180,7 +180,7 @@ struct OpenAIProvider: LLMProvider {
                 "function": [
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": jsonValueToAny(tool.parameters)
+                    "parameters": tool.parameters.anyValue
                 ] as [String: Any]
             ] as [String: Any]
         }
@@ -269,23 +269,6 @@ struct OpenAIProvider: LLMProvider {
             return "{}"
         }
         return string
-    }
-
-    nonisolated static func jsonValueToAny(_ value: JSONValue) -> Any {
-        switch value {
-        case .null:
-            return NSNull()
-        case .bool(let b):
-            return b
-        case .number(let n):
-            return n
-        case .string(let s):
-            return s
-        case .array(let arr):
-            return arr.map(jsonValueToAny)
-        case .object(let obj):
-            return obj.mapValues(jsonValueToAny)
-        }
     }
 }
 
@@ -378,7 +361,7 @@ nonisolated final class OpenAIStreamAssembler {
             }
             let id = (item["call_id"] as? String) ?? (item["id"] as? String) ?? ""
             let name = item["name"] as? String ?? ""
-            let arguments = Self.parseArguments(item["arguments"] as? String ?? "")
+            let arguments = JSONValue.parseArguments(item["arguments"] as? String ?? "")
             return [.toolCall(ToolCall(id: id, name: name, arguments: arguments))]
 
         case "response.completed":
@@ -454,24 +437,11 @@ nonisolated final class OpenAIStreamAssembler {
         var out: [StreamEvent] = []
         for index in toolOrder {
             guard let pending = pendingTools[index] else { continue }
-            let arguments = Self.parseArguments(pending.arguments)
+            let arguments = JSONValue.parseArguments(pending.arguments)
             out.append(.toolCall(ToolCall(id: pending.id, name: pending.name, arguments: arguments)))
         }
         pendingTools.removeAll()
         toolOrder.removeAll()
         return out
-    }
-
-    /// Parses an accumulated arguments buffer, falling back to an empty object.
-    private static func parseArguments(_ buffer: String) -> JSONValue {
-        let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard
-            !trimmed.isEmpty,
-            let data = trimmed.data(using: .utf8),
-            let value = try? JSONDecoder().decode(JSONValue.self, from: data)
-        else {
-            return .object([:])
-        }
-        return value
     }
 }

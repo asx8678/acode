@@ -77,12 +77,9 @@ struct Acode: AsyncParsableCommand {
     /// The acode release version, surfaced in the startup banner.
     nonisolated static let version = "0.1.0"
 
-    /// The neutral, sentence-case message shown when the API key is missing.
-    nonisolated static let missingKeyMessage = "Set ANTHROPIC_API_KEY to use acode."
-
-    private nonisolated static func apiKeyMissing() -> Bool {
-        let key = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"]
-        return key == nil || key?.isEmpty == true
+    /// Human-readable name for the active provider, used in verbose logs.
+    private nonisolated static func providerName(_ provider: any LLMProvider) -> String {
+        provider is OpenAIProvider ? "OpenAI" : "Anthropic"
     }
 
     mutating func run() async throws {
@@ -92,12 +89,8 @@ struct Acode: AsyncParsableCommand {
             return
         }
 
-        // One-shot: a missing key should not become a crash.
-        if Self.apiKeyMissing() {
-            FileHandle.standardError.write(Data((Self.missingKeyMessage + "\n").utf8))
-            throw ExitCode.failure
-        }
-
+        // One-shot: the provider throws `missingAPIKey` when a key is required,
+        // so configuration is left to the provider (local providers need none).
         _ = try await Self.executeOneShot(prompt: prompt, model: model, yes: yes, verbose: verbose)
     }
 
@@ -118,7 +111,7 @@ struct Acode: AsyncParsableCommand {
         )
         let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
         renderer.verboseLog("Model: \(resolvedModel)")
-        renderer.verboseLog("Provider: Anthropic")
+        renderer.verboseLog("Provider: \(providerName(provider))")
         let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: renderer)
 
         loop: while true {
@@ -150,10 +143,6 @@ struct Acode: AsyncParsableCommand {
                 print(result.output)
 
             case .task(let text):
-                if apiKeyMissing() {
-                    print(missingKeyMessage)
-                    continue
-                }
                 await runCancellable({ try await agent.run(text) }, renderer: renderer)
             }
         }
@@ -179,7 +168,7 @@ struct Acode: AsyncParsableCommand {
         )
         let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
         renderer.verboseLog("Model: \(resolvedModel)")
-        renderer.verboseLog("Provider: Anthropic")
+        renderer.verboseLog("Provider: \(providerName(provider))")
         return try await runOneShot(prompt: prompt, provider: provider, tools: tools, renderer: renderer)
     }
 }

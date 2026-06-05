@@ -92,4 +92,28 @@ nonisolated enum JSONValue: Codable, Sendable, Equatable {
         guard case .number(let value) = self else { return nil }
         return Int(value)
     }
+
+    /// Converts this JSONValue tree to an `Any` tree suitable for
+    /// `JSONSerialization.data(withJSONObject:)`.
+    nonisolated var anyValue: Any {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .number(let n): return n
+        case .string(let s): return s
+        case .array(let arr): return arr.map(\.anyValue)
+        case .object(let obj): return obj.mapValues { $0.anyValue }
+        }
+    }
+
+    /// Parses an accumulated partial-JSON buffer into a `JSONValue`,
+    /// falling back to an empty object on failure or empty input.
+    nonisolated static func parseArguments(_ buffer: String) -> JSONValue {
+        let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let value = try? JSONDecoder().decode(JSONValue.self, from: data)
+        else { return .object([:]) }
+        return value
+    }
 }
