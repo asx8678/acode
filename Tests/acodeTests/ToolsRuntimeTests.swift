@@ -34,6 +34,16 @@ import Testing
     #expect(result.output.contains("60000"))
 }
 
+@Test func test_run_shell_timeout() async {
+    let start = Date()
+    let tool = RunShellTool(timeout: 1)
+    let result = await tool.run(.object(["command": .string("sleep 10")]))
+
+    #expect(result.isError == true)
+    let elapsed = Date().timeIntervalSince(start)
+    #expect(elapsed < 3.0)
+}
+
 @Test func test_run_shell_cancellable() async {
     let start = Date()
     let task = Task { () -> ToolOutput in

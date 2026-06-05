@@ -83,7 +83,7 @@ func connectWithRetry<T>(max: Int, _ make: () async throws -> T) async throws ->
 @MainActor
 final class Agent {
     private let profile: AgentProfile
-    private let provider: any LLMProvider
+    private var provider: any LLMProvider
     private let tools: ToolRegistry
     private let renderer: Renderer
     private var conversation = Conversation()
@@ -93,6 +93,11 @@ final class Agent {
         self.provider = provider
         self.tools = tools
         self.renderer = renderer
+    }
+
+    /// Swaps the active provider mid-session (used by the `/model` command).
+    func switchProvider(_ newProvider: any LLMProvider) {
+        provider = newProvider
     }
 
     /// Clears the conversation history.

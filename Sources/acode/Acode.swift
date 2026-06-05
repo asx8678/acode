@@ -103,7 +103,7 @@ struct Acode: AsyncParsableCommand {
         let cfg = Config.load()
         var tools = ToolRegistry()
         registerStandardTools(&tools)
-        let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
+        var resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
         let provider = makeProvider(model: model, cfg: cfg)
         let color = Renderer.colorEnabled(
             isTTY: isatty(STDOUT_FILENO) != 0,
@@ -128,14 +128,27 @@ struct Acode: AsyncParsableCommand {
             case .slash(let command):
                 switch command {
                 case "help":
-                    print("Commands: /help, /clear, /quit. Prefix ! to run a shell command; anything else is a task.")
+                    print("Commands: /help, /clear, /model [name], /quit. Prefix ! to run a shell command; anything else is a task.")
                 case "clear":
                     agent.reset()
                     print("Conversation history cleared.")
                 case "quit":
                     break loop
                 default:
-                    print("Unknown command: /\(command)")
+                    if command == "model" || command.hasPrefix("model ") {
+                        let name = command.dropFirst("model".count).trimmingCharacters(in: .whitespaces)
+                        if name.isEmpty {
+                            print("Current model: \(resolvedModel).")
+                        } else {
+                            let newProvider = makeProvider(model: name, cfg: cfg)
+                            agent.switchProvider(newProvider)
+                            resolvedModel = name
+                            renderer.verboseLog("Provider: \(providerName(newProvider))")
+                            print("Model switched to \(name).")
+                        }
+                    } else {
+                        print("Unknown command: /\(command)")
+                    }
                 }
 
             case .shell(let command):
