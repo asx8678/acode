@@ -15,7 +15,7 @@ enum ProjectJailError: Error {
 /// approval, not by this jail.
 enum ProjectJail {
     /// The project root: the process current working directory.
-    static let root: String = FileManager.default.currentDirectoryPath
+    nonisolated static let root: String = FileManager.default.currentDirectoryPath
 
     /// Resolves `path` to a standardized, symlink-resolved absolute URL and
     /// throws `ProjectJailError.outsideProject` if it escapes the root.
