@@ -95,7 +95,19 @@ func makeProvider(model: String?, cfg: Config) -> any LLMProvider {
     let entry = cfg.models[resolved]
     let providerID = entry?.provider ?? cfg.defaultProvider ?? "anthropic"
 
-    switch providerID {
+    // Auto-detect: if no explicit config selected a provider and we'd default
+    // to anthropic, honor OpenAI intent signalled via environment variables.
+    let effectiveProvider: String
+    if providerID == "anthropic" && entry == nil && cfg.defaultProvider == nil {
+        let env = ProcessInfo.processInfo.environment
+        let hasOpenAIBaseURL = env["OPENAI_BASE_URL"].map { !$0.isEmpty } ?? false
+        let hasOpenAIKey = env["OPENAI_API_KEY"].map { !$0.isEmpty } ?? false
+        effectiveProvider = (hasOpenAIBaseURL || hasOpenAIKey) ? "openai" : providerID
+    } else {
+        effectiveProvider = providerID
+    }
+
+    switch effectiveProvider {
     case "openai":
         let baseURL = ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
             ?? defaultOpenAIBaseURL
