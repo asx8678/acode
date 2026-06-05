@@ -59,8 +59,10 @@ struct Acode: AsyncParsableCommand {
         var tools = ToolRegistry()
         registerStandardTools(&tools)
         let provider = makeProvider(model: model, cfg: cfg)
-        let color = isatty(STDOUT_FILENO) != 0
-            && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+        let color = Renderer.colorEnabled(
+            isTTY: isatty(STDOUT_FILENO) != 0,
+            noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
+        )
         let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
         return try await runOneShot(prompt: prompt, provider: provider, tools: tools, renderer: renderer)
     }

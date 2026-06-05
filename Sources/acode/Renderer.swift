@@ -1,10 +1,50 @@
 import Foundation
 
-/// A no-op spinner placeholder; real braille animation arrives in T1.3.
-nonisolated final class Spinner {
+/// An animated braille spinner that writes to stderr on a background task.
+nonisolated final class Spinner: @unchecked Sendable {
+    private static let frames = [
+        "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}",
+        "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}"
+    ]
+
+    private let label: String
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+
+    init(label: String) {
+        self.label = label
+    }
+
     @discardableResult
-    func start() -> Spinner { self }
-    func stop() {}
+    func start() -> Spinner {
+        lock.withLock {
+            guard task == nil else { return }
+            let label = self.label
+            task = Task.detached {
+                var index = 0
+                while !Task.isCancelled {
+                    let frame = Spinner.frames[index % Spinner.frames.count]
+                    FileHandle.standardError.write(Data("\r\(frame) \(label)".utf8))
+                    index += 1
+                    do {
+                        try await Task.sleep(for: .milliseconds(80))
+                    } catch {
+                        break
+                    }
+                }
+            }
+        }
+        return self
+    }
+
+    func stop() {
+        lock.withLock {
+            task?.cancel()
+            task = nil
+        }
+        // Clear the spinner line.
+        FileHandle.standardError.write(Data("\r\u{1B}[2K".utf8))
+    }
 }
 
 /// Renders agent output to stdout. Nonisolated and Sendable; no actor.
@@ -12,6 +52,16 @@ struct Renderer: Sendable {
     let color: Bool
     let autoApprove: Bool
     var verbose: Bool
+
+    /// Centralized color rule: color only on a TTY with NO_COLOR unset.
+    static func colorEnabled(isTTY: Bool, noColor: Bool) -> Bool {
+        isTTY && !noColor
+    }
+
+    /// Wraps `text` in an ANSI SGR code when color is enabled.
+    private nonisolated func paint(_ text: String, _ code: String) -> String {
+        color ? "\u{1B}[\(code)m\(text)\u{1B}[0m" : text
+    }
 
     nonisolated func banner() {
         print("acode \(Acode.version)")
@@ -28,21 +78,25 @@ struct Renderer: Sendable {
     }
 
     nonisolated func toolStart(_ c: ToolCall) {
-        print("→ \(c.name)")
+        print(paint("→ \(c.name)", "2"))
     }
 
     nonisolated func toolEnd(_ c: ToolCall, _ r: ToolResult) {
-        print(r.isError ? "\u{2717} \(c.name)" : "\u{2713} \(c.name)")
+        if r.isError {
+            print(paint("\u{2717} \(c.name)", "31"))
+        } else {
+            print(paint("\u{2713} \(c.name)", "32"))
+        }
     }
 
     /// Prints token usage only when verbose.
     nonisolated func usage(_ u: Usage) {
         guard verbose else { return }
-        print("· \(u.input)+\(u.output) tok")
+        print(paint("· \(u.input)+\(u.output) tok", "2"))
     }
 
     nonisolated func phase(_ p: String) {
-        print("● \(p)")
+        print(paint("● \(p)", "36"))
     }
 
     /// Returns true under auto-approve; otherwise reads a y/n line (default no).
@@ -55,6 +109,6 @@ struct Renderer: Sendable {
     }
 
     nonisolated func spinner(_ label: String) -> Spinner {
-        Spinner()
+        Spinner(label: label)
     }
 }
