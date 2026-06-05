@@ -52,21 +52,35 @@ struct Config: Codable {
     /// Loads config from `~/.config/acode/config.json`, tolerating a missing or
     /// malformed file by returning defaults. Environment variables
     /// `ACODE_MODEL` and `ACODE_PROVIDER` overlay the loaded values.
-    static func load() -> Config {
+    static func load(verbose: Bool = false) -> Config {
         let path = ("~/.config/acode/config.json" as NSString).expandingTildeInPath
-        return load(from: URL(fileURLWithPath: path))
+        return load(from: URL(fileURLWithPath: path), verbose: verbose)
     }
 
     /// Loads config from an explicit URL, applying environment overrides.
-    /// Factored out so tests can point at a temp file.
-    static func load(from url: URL) -> Config {
+    /// Factored out so tests can point at a temp file. When `verbose` is set,
+    /// emits diagnostics to standard error describing whether the file was
+    /// found, parsed, or missing.
+    static func load(from url: URL, verbose: Bool = false) -> Config {
         var config: Config
-        if
-            let data = try? Data(contentsOf: url),
-            let decoded = try? JSONDecoder().decode(Config.self, from: data) {
-            config = decoded
+        if let data = try? Data(contentsOf: url) {
+            if let decoded = try? JSONDecoder().decode(Config.self, from: data) {
+                config = decoded
+                if verbose {
+                    let modelStr = config.defaultModel ?? "none"
+                    let providerStr = config.defaultProvider ?? "none"
+                    let modelCount = config.models.count
+                    FileHandle.standardError.write(Data("Config: \(url.path) → model=\(modelStr) provider=\(providerStr) registry=\(modelCount) entries\n".utf8))
+                }
+            } else {
+                config = Config()
+                FileHandle.standardError.write(Data("Warning: \(url.path) exists but failed to parse. Check JSON syntax.\n".utf8))
+            }
         } else {
             config = Config()
+            if verbose {
+                FileHandle.standardError.write(Data("Config: \(url.path) not found, using defaults.\n".utf8))
+            }
         }
 
         let env = ProcessInfo.processInfo.environment

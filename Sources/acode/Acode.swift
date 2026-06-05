@@ -125,7 +125,7 @@ struct Acode: AsyncParsableCommand {
     private static func runREPL(model: String?, yes: Bool, verbose: Bool, agents: [String]) async {
         print("acode \(version)")
 
-        let cfg = Config.load()
+        let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
         registerStandardTools(&tools)
         var resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
@@ -211,7 +211,7 @@ struct Acode: AsyncParsableCommand {
         yes: Bool,
         verbose: Bool
     ) async throws -> String {
-        let cfg = Config.load()
+        let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
         registerStandardTools(&tools)
         let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
@@ -236,7 +236,7 @@ struct Acode: AsyncParsableCommand {
         verbose: Bool,
         agents: [String]
     ) async throws -> String {
-        let cfg = Config.load()
+        let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
         registerStandardTools(&tools)
         let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
