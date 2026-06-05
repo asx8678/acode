@@ -7,6 +7,12 @@ struct ModelEntry: Codable {
     let provider: String
     /// Overrides the provider's default context window when set.
     let contextWindow: Int?
+    /// Overrides the provider's default base URL when set (e.g. a DeepSeek or
+    /// other OpenAI-compatible endpoint). Lets users avoid `OPENAI_BASE_URL`.
+    let baseURL: String?
+    /// Explicit API key. Environment variables are preferred for secrets, but
+    /// this allows an env-var-free setup for convenience.
+    let apiKey: String?
 }
 
 /// User configuration loaded from `~/.config/acode/config.json`.
@@ -123,18 +129,23 @@ func makeProvider(model: String?, cfg: Config) -> any LLMProvider {
 
     switch effectiveProvider {
     case "openai":
-        let baseURL = ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
+        let baseURL = entry?.baseURL
+            ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
             ?? defaultOpenAIBaseURL
-        var provider = OpenAIProvider(configuredModel: resolved, baseURL: baseURL)
+        if entry?.apiKey != nil {
+            FileHandle.standardError.write(Data("Warning: apiKey is set in config for model '\(resolved)'. Environment variables (OPENAI_API_KEY) are preferred for secrets.\n".utf8))
+        }
+        var provider = OpenAIProvider(configuredModel: resolved, baseURL: baseURL, apiKey: entry?.apiKey)
         if let window = entry?.contextWindow {
             provider.contextWindow = window
         }
         return provider
 
     case "local":
-        let baseURL = ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
+        let baseURL = entry?.baseURL
+            ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
             ?? "http://localhost:11434/v1"
-        var provider = OpenAIProvider(configuredModel: resolved, baseURL: baseURL)
+        var provider = OpenAIProvider(configuredModel: resolved, baseURL: baseURL, apiKey: entry?.apiKey)
         if let window = entry?.contextWindow {
             provider.contextWindow = window
         }

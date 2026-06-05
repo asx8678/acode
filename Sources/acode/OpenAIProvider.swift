@@ -34,6 +34,10 @@ struct OpenAIProvider: LLMProvider {
     /// server and disables API-key authentication.
     var baseURL: String = defaultOpenAIBaseURL
 
+    /// Explicit API key. When set, it overrides `OPENAI_API_KEY`. Environment
+    /// variables are preferred for secrets; this supports an env-var-free setup.
+    var apiKey: String?
+
     private var isDefaultEndpoint: Bool { baseURL == defaultOpenAIBaseURL }
 
     func stream(
@@ -42,7 +46,8 @@ struct OpenAIProvider: LLMProvider {
         tools: [ToolSchema],
         model: String?
     ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"].flatMap { $0.isEmpty ? nil : $0 }
+        let key = apiKey.flatMap { $0.isEmpty ? nil : $0 }
+            ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"].flatMap { $0.isEmpty ? nil : $0 }
         if isDefaultEndpoint && key == nil {
             throw OpenAIError.missingAPIKey
         }
