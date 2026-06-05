@@ -8,7 +8,7 @@ import Testing
     registerStandardTools(&registry)
 
     let names = Set(registry.schemas(allowed: nil).map(\.name))
-    #expect(names == ["read_file", "list_files", "grep", "edit_file", "run_shell"])
+    #expect(names == ["read_file", "list_files", "grep", "edit_file", "run_shell", "list_skills", "activate_skill"])
 }
 
 @Test func test_config_load_and_select() throws {

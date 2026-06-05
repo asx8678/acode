@@ -38,6 +38,46 @@ private struct PromptTestTool: Tool {
     #expect(rules.contains(marker))
 }
 
+@Test func test_prompt_lists_skills() throws {
+    let skillsDir = URL(fileURLWithPath: ProjectJail.root, isDirectory: true)
+        .appendingPathComponent(".acode/skills", isDirectory: true)
+
+    let fm = FileManager.default
+    let dirExisted = fm.fileExists(atPath: skillsDir.path)
+    try fm.createDirectory(at: skillsDir, withIntermediateDirectories: true)
+
+    let suffix = UUID().uuidString.prefix(8)
+    let nameA = "zskill-a-\(suffix)"
+    let nameB = "zskill-b-\(suffix)"
+    let summaryA = "Summary for skill A."
+    let summaryB = "Summary for skill B."
+    let fileA = skillsDir.appendingPathComponent("\(nameA).md")
+    let fileB = skillsDir.appendingPathComponent("\(nameB).md")
+    try "\(summaryA)\nmore body".write(to: fileA, atomically: true, encoding: .utf8)
+    try "\(summaryB)\nmore body".write(to: fileB, atomically: true, encoding: .utf8)
+
+    defer {
+        try? fm.removeItem(at: fileA)
+        try? fm.removeItem(at: fileB)
+        if !dirExisted { try? fm.removeItem(at: skillsDir) }
+    }
+
+    var registry = ToolRegistry()
+    registry.register(PromptTestTool())
+    let profile = AgentProfile(
+        name: "test",
+        identity: "IDENTITY-LAYER",
+        rules: "RULES-LAYER",
+        tools: nil,
+        model: nil
+    )
+
+    let prompt = Prompt.assemble(profile: profile, registry: registry)
+    #expect(prompt.contains("Available skills (use activate_skill to load full instructions):"))
+    #expect(prompt.contains("- \(nameA): \(summaryA)"))
+    #expect(prompt.contains("- \(nameB): \(summaryB)"))
+}
+
 @Test func test_prompt_assembles_five_layers() {
     var registry = ToolRegistry()
     registry.register(PromptTestTool())

@@ -26,8 +26,14 @@ enum Prompt {
         return (["Available tools:"] + lines).joined(separator: "\n")
     }
 
-    /// One line per skill (filled in T4.2).
-    static func skillIndex() -> String { "" }
+    /// One line per skill, prefixed with an activation hint (invariant B8 layer ④).
+    static func skillIndex() -> String {
+        let entries = Skills.index()
+        guard !entries.isEmpty else { return "" }
+        let lines = entries.map { "- \($0.name): \($0.summary)" }
+        return (["Available skills (use activate_skill to load full instructions):"] + lines)
+            .joined(separator: "\n")
+    }
 
     /// Combined AGENTS.md project rules, included verbatim (invariant B8 layer ⑤).
     ///

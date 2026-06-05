@@ -122,12 +122,14 @@ func makeProvider(model: String?, cfg: Config) -> any LLMProvider {
 }
 
 /// Registers the standard M2 tool set: read_file, list_files, grep, edit_file,
-/// run_shell. Each file tool jails its paths via ProjectJail internally.
-/// (Skills tools are added in M4.)
+/// run_shell, list_skills, activate_skill. Each file tool jails its paths via
+/// ProjectJail internally.
 func registerStandardTools(_ tools: inout ToolRegistry) {
     tools.register(ReadFileTool())
     tools.register(ListFilesTool())
     tools.register(GrepTool())
     tools.register(EditFileTool())
     tools.register(RunShellTool())
+    tools.register(ListSkillsTool())
+    tools.register(ActivateSkillTool())
 }
