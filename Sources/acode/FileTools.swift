@@ -3,6 +3,11 @@ import Foundation
 /// Maximum number of lines returned by an uncapped `read_file` read.
 private let readFileLineCap = 2000
 
+/// Directory names excluded from listing and traversal.
+nonisolated let ignoredDirectoryNames: Set<String> = [
+    ".git", ".build", "DerivedData", "node_modules", ".venv", "dist"
+]
+
 /// Reads a file under the project root, optionally a line range.
 struct ReadFileTool: Tool {
     let requiresApproval = false
@@ -53,6 +58,51 @@ struct ReadFileTool: Tool {
             return ToolOutput(output: contents)
         } catch {
             return ToolOutput(output: "Could not read \(path): \(error.localizedDescription)", isError: true)
+        }
+    }
+}
+
+/// Lists one directory level under the project root, excluding ignored dirs.
+struct ListFilesTool: Tool {
+    let requiresApproval = false
+
+    static var schema: ToolSchema {
+        ToolSchema(
+            name: "list_files",
+            description: "List the contents of a directory (one level) under the project root.",
+            parameters: Schema.object(
+                ["path": (type: "string", description: "Directory path, relative to the project root. Defaults to \".\".")],
+                required: []
+            )
+        )
+    }
+
+    func run(_ args: JSONValue) async -> ToolOutput {
+        let path = args["path"]?.stringValue ?? "."
+        do {
+            let url = try ProjectJail.resolve(path)
+            let entries = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+            )
+
+            var lines: [String] = []
+            for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                let name = entry.lastPathComponent
+                let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDirectory && ignoredDirectoryNames.contains(name) {
+                    continue
+                }
+                lines.append(isDirectory ? "\(name)/" : name)
+            }
+
+            if lines.isEmpty {
+                return ToolOutput(output: "(empty)")
+            }
+            return ToolOutput(output: lines.joined(separator: "\n"))
+        } catch {
+            return ToolOutput(output: "Could not list \(path): \(error.localizedDescription)", isError: true)
         }
     }
 }
