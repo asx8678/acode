@@ -13,11 +13,11 @@ enum AnthropicError: Error {
     case malformedResponse
 }
 
-/// An `LLMProvider` backed by the Anthropic Messages API.
+/// An `LLMProvider` backed by the Anthropic Messages API over SSE streaming.
 ///
-/// This implementation performs a non-streaming request and then replays the
-/// assembled result as a stream (text, then tool calls, then done). Real SSE
-/// streaming arrives in T1.2.
+/// The HTTP status is validated before the stream is returned, so a transport
+/// or non-2xx failure throws from `stream(...)` (retriable per invariant B7);
+/// errors during iteration are surfaced, never retried.
 struct AnthropicProvider: LLMProvider {
     let contextWindow = 200_000
 
@@ -49,7 +49,9 @@ struct AnthropicProvider: LLMProvider {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = data
 
-        let (responseData, response) = try await URLSession.shared.data(for: request)
+        // Establish the connection and validate status BEFORE returning the
+        // stream, so failures here are retriable (invariant B7).
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AnthropicError.malformedResponse
         }
@@ -57,13 +59,43 @@ struct AnthropicProvider: LLMProvider {
             throw AnthropicError.httpStatus(http.statusCode)
         }
 
-        let events = try Self.parseResponse(responseData)
         return AsyncThrowingStream { continuation in
-            for event in events {
-                continuation.yield(event)
+            let producer = Task {
+                let assembler = ResponseAssembler()
+                do {
+                    for try await line in bytes.lines {
+                        for event in Self.events(forSSELines: [line], assembler: assembler) {
+                            continuation.yield(event)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    // Surface mid-stream errors; never retry (invariant B7).
+                    continuation.finish(throwing: error)
+                }
             }
-            continuation.finish()
+            continuation.onTermination = { _ in producer.cancel() }
         }
+    }
+
+    /// Maps SSE lines to events using a shared assembler. Pure and network-free
+    /// so the producer loop and tests share one code path.
+    nonisolated static func events(forSSELines lines: [String], assembler: ResponseAssembler) -> [StreamEvent] {
+        var out: [StreamEvent] = []
+        for line in lines {
+            if line.isEmpty || line.hasPrefix("event:") {
+                continue
+            }
+            guard line.hasPrefix("data:") else {
+                continue
+            }
+            var payload = String(line.dropFirst("data:".count))
+            if payload.hasPrefix(" ") {
+                payload.removeFirst()
+            }
+            out.append(contentsOf: assembler.ingest(payload))
+        }
+        return out
     }
 
     // MARK: - Request construction (testable; no network)
@@ -79,6 +111,7 @@ struct AnthropicProvider: LLMProvider {
         var body: [String: Any] = [
             "model": model ?? defaultAnthropicModel,
             "max_tokens": anthropicMaxTokens,
+            "stream": true,
             "system": system,
             "messages": messages.map(convert(message:)),
             "tools": tools.map { tool in
@@ -129,47 +162,6 @@ struct AnthropicProvider: LLMProvider {
         }
     }
 
-    // MARK: - Response parsing
-
-    private nonisolated static func parseResponse(_ data: Data) throws -> [StreamEvent] {
-        guard
-            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let content = root["content"] as? [[String: Any]]
-        else {
-            throw AnthropicError.malformedResponse
-        }
-
-        var text = ""
-        var calls: [ToolCall] = []
-        for block in content {
-            switch block["type"] as? String {
-            case "text":
-                text += (block["text"] as? String) ?? ""
-            case "tool_use":
-                if
-                    let id = block["id"] as? String,
-                    let name = block["name"] as? String {
-                    let arguments = anyToJSONValue(block["input"] ?? [String: Any]())
-                    calls.append(ToolCall(id: id, name: name, arguments: arguments))
-                }
-            default:
-                break
-            }
-        }
-
-        var usage = Usage()
-        if let usageObject = root["usage"] as? [String: Any] {
-            usage.input = (usageObject["input_tokens"] as? Int) ?? 0
-            usage.output = (usageObject["output_tokens"] as? Int) ?? 0
-        }
-        let stop = (root["stop_reason"] as? String) ?? "end_turn"
-
-        var events: [StreamEvent] = [.textDelta(text)]
-        events.append(contentsOf: calls.map(StreamEvent.toolCall))
-        events.append(.done(stop: stop, usage: usage))
-        return events
-    }
-
     // MARK: - JSONValue bridging
 
     private nonisolated static func jsonValueToAny(_ value: JSONValue) -> Any {
@@ -186,26 +178,6 @@ struct AnthropicProvider: LLMProvider {
             return arr.map(jsonValueToAny)
         case .object(let obj):
             return obj.mapValues(jsonValueToAny)
-        }
-    }
-
-    private nonisolated static func anyToJSONValue(_ value: Any) -> JSONValue {
-        switch value {
-        case is NSNull:
-            return .null
-        case let number as NSNumber:
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                return .bool(number.boolValue)
-            }
-            return .number(number.doubleValue)
-        case let s as String:
-            return .string(s)
-        case let arr as [Any]:
-            return .array(arr.map(anyToJSONValue))
-        case let obj as [String: Any]:
-            return .object(obj.mapValues(anyToJSONValue))
-        default:
-            return .null
         }
     }
 }
