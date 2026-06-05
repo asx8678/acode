@@ -29,6 +29,27 @@ enum Prompt {
     /// One line per skill (filled in T4.2).
     static func skillIndex() -> String { "" }
 
-    /// Combined AGENTS.md project rules (filled in T3.3).
-    static func projectRules() -> String { "" }
+    /// Combined AGENTS.md project rules, included verbatim (invariant B8 layer ⑤).
+    ///
+    /// Reads, in order, and concatenates the non-empty contents of:
+    ///   1. `./.acode/AGENTS.md` — project-local acode rules
+    ///   2. `./AGENTS.md`        — standard project rules
+    ///   3. `~/.config/acode/AGENTS.md` — global user rules
+    ///
+    /// Missing files are silently skipped. No transformation is applied.
+    static func projectRules() -> String {
+        let rootURL = URL(fileURLWithPath: ProjectJail.root, isDirectory: true)
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser
+        let paths = [
+            rootURL.appendingPathComponent(".acode/AGENTS.md"),
+            rootURL.appendingPathComponent("AGENTS.md"),
+            homeURL.appendingPathComponent(".config/acode/AGENTS.md")
+        ]
+        let contents = paths.compactMap { url -> String? in
+            guard let text = try? String(contentsOf: url, encoding: .utf8),
+                  !text.isEmpty else { return nil }
+            return text
+        }
+        return contents.joined(separator: "\n\n")
+    }
 }
