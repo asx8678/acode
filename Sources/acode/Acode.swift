@@ -1,8 +1,5 @@
 import ArgumentParser
 
-/// The acode release version, surfaced in the startup banner.
-nonisolated let acodeVersion = "0.1.0"
-
 /// Entry point for the acode terminal coding agent.
 ///
 /// T0.1 establishes the command shape only; `run()` prints a banner and exits.
@@ -16,7 +13,10 @@ struct Acode: AsyncParsableCommand {
     @Option(name: .shortAndLong) var prompt: String?
     @Flag(name: .long) var verbose: Bool = false
 
+    /// The acode release version, surfaced in the startup banner.
+    nonisolated static let version = "0.1.0"
+
     mutating func run() async throws {
-        print("acode \(acodeVersion)")
+        print("acode \(Acode.version)")
     }
 }
