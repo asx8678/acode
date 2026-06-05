@@ -108,23 +108,42 @@ struct AnthropicProvider: LLMProvider {
         tools: [ToolSchema],
         model: String?
     ) -> [String: Any] {
-        var body: [String: Any] = [
+        // System prompt as content blocks with a cache breakpoint on the last
+        // block (prompt caching, T3.4). An empty system stays a plain string.
+        let systemValue: Any
+        if system.isEmpty {
+            systemValue = system
+        } else {
+            systemValue = [
+                [
+                    "type": "text",
+                    "text": system,
+                    "cache_control": ["type": "ephemeral"]
+                ] as [String: Any]
+            ]
+        }
+
+        // Tool definitions; cache_control goes on the LAST tool only, since the
+        // Anthropic API allows a single breakpoint at the end of the array.
+        var toolBlocks: [[String: Any]] = tools.map { tool in
+            [
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": jsonValueToAny(tool.parameters)
+            ] as [String: Any]
+        }
+        if !toolBlocks.isEmpty {
+            toolBlocks[toolBlocks.count - 1]["cache_control"] = ["type": "ephemeral"]
+        }
+
+        let body: [String: Any] = [
             "model": model ?? defaultAnthropicModel,
             "max_tokens": anthropicMaxTokens,
             "stream": true,
-            "system": system,
+            "system": systemValue,
             "messages": messages.map(convert(message:)),
-            "tools": tools.map { tool in
-                [
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": jsonValueToAny(tool.parameters)
-                ] as [String: Any]
-            }
+            "tools": toolBlocks
         ]
-        if tools.isEmpty {
-            body["tools"] = [[String: Any]]()
-        }
         return body
     }
 
