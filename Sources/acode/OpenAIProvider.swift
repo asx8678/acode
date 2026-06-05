@@ -25,7 +25,7 @@ enum OpenAIError: Error {
 /// `stream(...)` (retriable per invariant B7); errors during iteration are
 /// surfaced, never retried.
 struct OpenAIProvider: LLMProvider {
-    var contextWindow: Int { 128_000 }
+    var contextWindow: Int = 128_000
 
     /// Model used when the per-call `model` argument is nil.
     var configuredModel: String?

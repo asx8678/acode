@@ -19,7 +19,7 @@ enum AnthropicError: Error {
 /// or non-2xx failure throws from `stream(...)` (retriable per invariant B7);
 /// errors during iteration are surfaced, never retried.
 struct AnthropicProvider: LLMProvider {
-    let contextWindow = 200_000
+    var contextWindow = 200_000
 
     /// The Messages endpoint. Documented invariant: this is a fixed, valid
     /// literal URL, so the force-unwrap is known-safe (§D).
