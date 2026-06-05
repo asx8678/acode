@@ -97,7 +97,9 @@ func makeProvider(model: String?, cfg: Config) -> any LLMProvider {
 
     switch providerID {
     case "openai":
-        var provider = OpenAIProvider(configuredModel: resolved)
+        let baseURL = ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
+            ?? defaultOpenAIBaseURL
+        var provider = OpenAIProvider(configuredModel: resolved, baseURL: baseURL)
         if let window = entry?.contextWindow {
             provider.contextWindow = window
         }
