@@ -48,6 +48,72 @@ private func makeAgent(provider: any LLMProvider, flag: RanFlag) -> Agent {
     #expect(answer == "final answer")
 }
 
+/// Thread-safe attempt counter for retry tests.
+private nonisolated final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func increment() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+/// Retries, failing with 503 until the third attempt then succeeding.
+/// `nonisolated` so the retried closure isn't main-actor-isolated.
+private nonisolated func retryFailingTwice(_ counter: Counter) async throws -> String {
+    try await connectWithRetry(max: 3) {
+        let attempt = counter.increment()
+        if attempt < 3 {
+            throw AnthropicError.httpStatus(503)
+        }
+        return "ok"
+    }
+}
+
+/// Retries while always throwing `CancellationError` (must not retry).
+private nonisolated func retryAlwaysCancelling() async throws -> String {
+    try await connectWithRetry(max: 3) {
+        throw CancellationError()
+    }
+}
+
+/// Retries while always throwing a non-retryable 400 (must fail fast).
+private nonisolated func retryNonRetryable(_ counter: Counter) async throws -> String {
+    try await connectWithRetry(max: 3) {
+        _ = counter.increment()
+        throw AnthropicError.httpStatus(400)
+    }
+}
+
+@Test func test_retry_succeeds_after_failures() async throws {
+    let counter = Counter()
+    let result = try await retryFailingTwice(counter)
+    #expect(result == "ok")
+    #expect(counter.count == 3)
+}
+
+@Test func test_retry_passes_cancellation() async throws {
+    let task = Task { try await retryAlwaysCancelling() }
+    task.cancel()
+    var thrown: Error?
+    do {
+        _ = try await task.value
+    } catch {
+        thrown = error
+    }
+    #expect(thrown is CancellationError)
+}
+
+@Test func test_retry_fails_fast_on_non_retryable_status() async {
+    let counter = Counter()
+    var thrown: Error?
+    do {
+        _ = try await retryNonRetryable(counter)
+    } catch {
+        thrown = error
+    }
+    #expect(thrown is AnthropicError)
+    #expect(counter.count == 1)
+}
+
 @MainActor
 @Test func test_loop_step_limit() async {
     let flag = RanFlag()

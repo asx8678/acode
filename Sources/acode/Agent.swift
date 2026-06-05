@@ -9,18 +9,57 @@ enum AgentError: Error {
 /// Maximum tool/answer iterations per turn (invariant B1).
 private nonisolated let maxAgentSteps = 50
 
-/// Attempts `make()` up to `max` times. Rethrows `CancellationError`
-/// immediately; otherwise retries and throws the last error after `max`
-/// attempts. Backoff/jitter and status-aware retry arrive in T3.2.
+/// HTTP status codes worth retrying: rate limit, transient server faults,
+/// and Anthropic's "overloaded" (529).
+private nonisolated let retryableStatusCodes: Set<Int> = [429, 500, 502, 503, 529]
+
+/// Extracts an HTTP status code from a known provider error, if present.
+/// Returns `nil` for non-HTTP errors (e.g. transport failures), which are
+/// treated as transient and therefore retriable.
+private func httpStatus(of error: Error) -> Int? {
+    if case AnthropicError.httpStatus(let code) = error {
+        return code
+    }
+    return nil
+}
+
+/// Attempts `make()` up to `max` times with exponential backoff and full
+/// jitter between attempts.
+///
+/// Retry policy (invariant B7 — retry only before the first byte):
+/// - `CancellationError` is rethrown immediately, never retried.
+/// - HTTP errors retry only on `retryableStatusCodes`; other status codes
+///   throw immediately.
+/// - Non-HTTP errors (transport/network) are treated as transient and retried.
+///
+/// Backoff doubles from a 1s base (1s, 2s, 4s, ...) with full jitter: the
+/// actual delay is uniformly random in `[0, baseDelay]`.
 func connectWithRetry<T>(max: Int, _ make: () async throws -> T) async throws -> T {
+    let attempts = Swift.max(1, max)
     var lastError: Error?
-    for _ in 0..<Swift.max(1, max) {
+    for attempt in 0..<attempts {
         do {
             return try await make()
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             lastError = error
+
+            // HTTP errors outside the retryable set fail fast.
+            if let status = httpStatus(of: error), !retryableStatusCodes.contains(status) {
+                throw error
+            }
+
+            // No delay after the final attempt.
+            let isLastAttempt = attempt == attempts - 1
+            if isLastAttempt { break }
+
+            let baseDelay = pow(2.0, Double(attempt))  // 1s, 2s, 4s, ...
+            let delay = Double.random(in: 0...baseDelay)
+            FileHandle.standardError.write(
+                Data("Retrying in \(String(format: "%.1f", delay))s (attempt \(attempt + 2)/\(attempts))...\n".utf8)
+            )
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
     }
     // The loop runs at least once, so a failure path always sets `lastError`;
