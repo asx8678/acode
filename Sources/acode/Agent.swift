@@ -23,6 +23,8 @@ func connectWithRetry<T>(max: Int, _ make: () async throws -> T) async throws ->
             lastError = error
         }
     }
+    // The loop runs at least once, so a failure path always sets `lastError`;
+    // the fallback is unreachable and exists only to satisfy the type checker.
     throw lastError ?? AgentError.stepLimit
 }
 

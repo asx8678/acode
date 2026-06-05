@@ -21,6 +21,10 @@ enum AnthropicError: Error {
 struct AnthropicProvider: LLMProvider {
     let contextWindow = 200_000
 
+    /// The Messages endpoint. Documented invariant: this is a fixed, valid
+    /// literal URL, so the force-unwrap is known-safe (§D).
+    private nonisolated static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+
     /// Model used when the per-call `model` argument is nil.
     var configuredModel: String?
 
@@ -38,7 +42,7 @@ struct AnthropicProvider: LLMProvider {
         let body = Self.makeRequestBody(system: system, messages: messages, tools: tools, model: resolvedModel)
         let data = try JSONSerialization.data(withJSONObject: body)
 
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages").unsafelyUnwrapped)
+        var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")

@@ -8,8 +8,7 @@ import Testing
         .standardizedFileURL
         .resolvingSymlinksInPath()
     let resolvedRoot = rootURL.path
-    #expect(resolved.path == resolvedRoot + "/inside-file.txt"
-        || resolved.path.hasPrefix(resolvedRoot + "/"))
+    #expect(resolved.path == resolvedRoot + "/inside-file.txt")
 }
 
 @Test func test_jail_rejects_traversal() {
