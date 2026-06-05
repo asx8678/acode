@@ -21,6 +21,9 @@ enum AnthropicError: Error {
 struct AnthropicProvider: LLMProvider {
     let contextWindow = 200_000
 
+    /// Model used when the per-call `model` argument is nil.
+    var configuredModel: String?
+
     func stream(
         system: String,
         messages: [Message],
@@ -31,7 +34,8 @@ struct AnthropicProvider: LLMProvider {
             throw AnthropicError.missingAPIKey
         }
 
-        let body = Self.makeRequestBody(system: system, messages: messages, tools: tools, model: model)
+        let resolvedModel = model ?? configuredModel
+        let body = Self.makeRequestBody(system: system, messages: messages, tools: tools, model: resolvedModel)
         let data = try JSONSerialization.data(withJSONObject: body)
 
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages").unsafelyUnwrapped)
