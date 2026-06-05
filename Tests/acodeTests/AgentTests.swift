@@ -115,6 +115,23 @@ private nonisolated func retryNonRetryable(_ counter: Counter) async throws -> S
 }
 
 @MainActor
+@Test func test_switch_provider() async throws {
+    let flag = RanFlag()
+    let first = FakeProvider(scripts: [
+        [.textDelta("first provider"), .done(stop: "end_turn", usage: Usage())]
+    ])
+    let agent = makeAgent(provider: first, flag: flag)
+
+    let second = FakeProvider(scripts: [
+        [.textDelta("second provider"), .done(stop: "end_turn", usage: Usage())]
+    ])
+    agent.switchProvider(second)
+
+    let answer = try await agent.run("test")
+    #expect(answer == "second provider")
+}
+
+@MainActor
 @Test func test_loop_step_limit() async {
     let flag = RanFlag()
     let call = ToolCall(id: "c1", name: "record", arguments: .object([:]))

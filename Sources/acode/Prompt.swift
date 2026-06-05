@@ -43,6 +43,10 @@ enum Prompt {
     ///   3. `~/.config/acode/AGENTS.md` — global user rules
     ///
     /// Missing files are silently skipped. No transformation is applied.
+    ///
+    /// NOTE: Performs synchronous file I/O on the main actor. The AGENTS.md
+    /// files are small and few, so the blocking cost is negligible; acceptable
+    /// for now.
     static func projectRules() -> String {
         let rootURL = URL(fileURLWithPath: ProjectJail.root, isDirectory: true)
         let homeURL = FileManager.default.homeDirectoryForCurrentUser

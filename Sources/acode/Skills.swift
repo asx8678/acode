@@ -26,6 +26,17 @@ enum Skills {
             .appendingPathComponent(".acode/skills", isDirectory: true)
     }
 
+    /// Returns true if `name` is a safe, single-component skill name with no
+    /// path-traversal potential (no separators and no `..`).
+    nonisolated static func isValidName(_ name: String) -> Bool {
+        !name.isEmpty
+            && !name.contains("/")
+            && !name.contains("\\")
+            && !name.contains("..")
+    }
+
+    // NOTE: This performs synchronous file I/O on the main actor. Skill files
+    // are small and few, so the blocking cost is negligible; acceptable for now.
     /// Reads all `*.md` files from the global and project-local skill
     /// directories. Project-local skills shadow global skills with the
     /// same name (last wins, so project-local takes precedence).
@@ -44,11 +55,16 @@ enum Skills {
     /// Returns the full body of the named skill, or nil if not found.
     /// Searches project-local first, then global.
     nonisolated static func body(for name: String) -> String? {
-        let candidates = [
-            projectDirectory.appendingPathComponent("\(name).md"),
-            globalDirectory.appendingPathComponent("\(name).md")
-        ]
-        for url in candidates {
+        // Reject path-traversal attempts before touching the filesystem.
+        guard isValidName(name) else { return nil }
+        let directories = [projectDirectory, globalDirectory]
+        for directory in directories {
+            let url = directory.appendingPathComponent("\(name).md")
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+            // Confirm the resolved path is still inside the skills directory.
+            let base = directory.standardizedFileURL.resolvingSymlinksInPath().path
+            guard url.path.hasPrefix(base + "/") else { continue }
             if let text = try? String(contentsOf: url, encoding: .utf8) {
                 return text
             }
@@ -122,6 +138,9 @@ struct ActivateSkillTool: Tool {
     func run(_ args: JSONValue) async -> ToolOutput {
         guard let name = args["name"]?.stringValue else {
             return ToolOutput(output: "Missing required argument: name.", isError: true)
+        }
+        guard Skills.isValidName(name) else {
+            return ToolOutput(output: "Invalid skill name: \(name)", isError: true)
         }
         guard let body = Skills.body(for: name) else {
             return ToolOutput(output: "Unknown skill: \(name)", isError: true)
