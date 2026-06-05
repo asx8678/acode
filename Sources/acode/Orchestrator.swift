@@ -3,15 +3,15 @@ import Foundation
 /// Verdict returned by the reviewer agent on the LAST LINE of its output.
 enum Verdict: Sendable {
     case approved
-    case changesRequested(feedback: String)
+    case changes(feedback: String)
 
     /// Parses the verdict from the reviewer's full output.
     ///
     /// Only the last non-empty line is examined:
-    /// - `"APPROVED"` (case-insensitive) → ``approved``
-    /// - `"CHANGES_REQUESTED"` (case-insensitive) → ``changesRequested`` with
-    ///   the full output as feedback
-    /// - Anything else → ``changesRequested`` (treat the full output as feedback)
+    /// - `"VERDICT: APPROVED"` (case-insensitive) → ``approved``
+    /// - `"VERDICT: CHANGES"` (case-insensitive) → ``changes`` with the full
+    ///   output as feedback
+    /// - Anything else → ``changes`` (treat the full output as feedback)
     nonisolated static func parse(from output: String) -> Verdict {
         let lastLine = output
             .split(separator: "\n", omittingEmptySubsequences: false)
@@ -19,10 +19,10 @@ enum Verdict: Sendable {
             .last { !$0.isEmpty } ?? ""
 
         switch lastLine.uppercased() {
-        case "APPROVED":
+        case "VERDICT: APPROVED":
             return .approved
         default:
-            return .changesRequested(feedback: output)
+            return .changes(feedback: output)
         }
     }
 }
@@ -91,14 +91,14 @@ struct Orchestrator {
             let reviewer = Agent(profile: profiles.reviewer, provider: provider, tools: tools, renderer: renderer)
             let reviewOutput = try await reviewer.run(
                 "Review the following implementation against the plan:\n\nPlan:\n\(plan)\n\n"
-                + "Review the code changes made. Output APPROVED or CHANGES_REQUESTED on the last line."
+                + "Review the code changes made. Output VERDICT: APPROVED or VERDICT: CHANGES on the last line."
             )
             renderer.endAssistant()
 
             switch Verdict.parse(from: reviewOutput) {
             case .approved:
                 return lastCoderOutput
-            case .changesRequested(let newFeedback):
+            case .changes(let newFeedback):
                 feedback = newFeedback
             }
         }

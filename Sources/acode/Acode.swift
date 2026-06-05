@@ -253,13 +253,25 @@ struct Acode: AsyncParsableCommand {
             profiles = (profile(for: agents[0]), .coder, .reviewer)
         }
 
+        let finalProfiles = (
+            applyRoleModel(profiles.0, roleModels: cfg.roleModels),
+            applyRoleModel(profiles.1, roleModels: cfg.roleModels),
+            applyRoleModel(profiles.2, roleModels: cfg.roleModels)
+        )
+
         let orchestrator = Orchestrator()
         return try await orchestrator.run(
             task: prompt,
             provider: provider,
             tools: tools,
             renderer: renderer,
-            profiles: profiles
+            profiles: finalProfiles
         )
+    }
+
+    /// Applies a per-role model override from `Config.roleModels` to a profile.
+    private static func applyRoleModel(_ profile: AgentProfile, roleModels: [String: String]?) -> AgentProfile {
+        guard let roleModels, let model = roleModels[profile.name] else { return profile }
+        return AgentProfile(name: profile.name, identity: profile.identity, rules: profile.rules, tools: profile.tools, model: model)
     }
 }

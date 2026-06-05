@@ -100,12 +100,6 @@ final class Agent {
         provider = newProvider
     }
 
-    /// Swaps the active profile mid-session (used by the orchestrator to reuse
-    /// a single agent across planner/coder/reviewer phases).
-    func switchProfile(_ newProfile: AgentProfile) {
-        profile = newProfile
-    }
-
     /// Clears the conversation history.
     func reset() {
         conversation = Conversation()

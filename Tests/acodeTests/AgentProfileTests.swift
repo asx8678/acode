@@ -14,7 +14,7 @@ import Testing
 @Test func test_reviewer_allowlist_excludes_mutating() {
     let tools = try! #require(AgentProfile.reviewer.tools)
     #expect(!tools.contains("edit_file"))
-    #expect(!tools.contains("run_shell"))
+    #expect(tools.contains("run_shell"))
     #expect(tools.contains("read_file"))
     #expect(tools.contains("list_files"))
     #expect(tools.contains("grep"))

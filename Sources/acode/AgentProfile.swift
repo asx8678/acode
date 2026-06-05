@@ -71,12 +71,12 @@ struct AgentProfile: Sendable {
         1. Compare the implemented changes against the original plan.
         2. Check for bugs, security issues, and edge cases.
         3. Verify code follows project conventions.
-        4. Check that tests pass (ask the coder to run them if needed).
+        4. Run builds and tests yourself using run_shell to verify correctness.
         5. Output a review with one of these verdicts on the LAST LINE:
-           APPROVED — the implementation is correct and complete.
-           CHANGES_REQUESTED — list specific issues that must be fixed.
+           VERDICT: APPROVED — the implementation is correct and complete.
+           VERDICT: CHANGES — list specific issues that must be fixed.
         """,
-        tools: ["read_file", "list_files", "grep", "list_skills", "activate_skill"],
+        tools: ["read_file", "list_files", "grep", "run_shell"],
         model: nil
     )
 }
