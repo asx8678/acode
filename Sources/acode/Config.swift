@@ -116,6 +116,59 @@ struct Config: Codable {
     }
 }
 
+/// Surgically persists the three approval keys into the JSON config at `url`,
+/// preserving ALL other keys (including `models`/`apiKey` and any unknown keys).
+///
+/// Reads the existing file via `JSONSerialization` (missing file ⇒ empty
+/// object), sets only `autoApprove`, `autoApproveTools`, and `autoApproveShell`,
+/// backs up the original to `<path>.bak`, then writes atomically. Never throws;
+/// returns `false` on any error. Avoids re-encoding the `Config` struct so
+/// unknown keys are not dropped.
+func saveApprovals(
+    autoApprove: Bool,
+    autoApproveTools: [String],
+    autoApproveShell: [String],
+    to url: URL
+) -> Bool {
+    var root: [String: Any]
+    if let data = try? Data(contentsOf: url) {
+        guard let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return false
+        }
+        root = parsed
+        // Back up the existing file before overwriting.
+        let backupURL = URL(fileURLWithPath: url.path + ".bak")
+        do {
+            try data.write(to: backupURL, options: .atomic)
+        } catch {
+            return false
+        }
+    } else {
+        root = [:]
+    }
+
+    root["autoApprove"] = autoApprove
+    root["autoApproveTools"] = autoApproveTools
+    root["autoApproveShell"] = autoApproveShell
+
+    guard JSONSerialization.isValidJSONObject(root),
+          let out = try? JSONSerialization.data(
+              withJSONObject: root, options: [.prettyPrinted, .sortedKeys]
+          ) else {
+        return false
+    }
+    do {
+        // Ensure the parent directory exists.
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try out.write(to: url, options: .atomic)
+        return true
+    } catch {
+        return false
+    }
+}
+
 /// Builds the active provider for a resolved model.
 ///
 /// Resolution order:

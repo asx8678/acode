@@ -86,6 +86,26 @@ nonisolated final class ApprovalPolicy: @unchecked Sendable {
         autoApproveAll = on
     }
 
+    /// Adds a shell-command prefix to the session allowlist. Trims input,
+    /// ignores empty, and dedupes (skips if already present).
+    func allowShellPrefix(_ prefix: String) {
+        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        if !allowedShellPrefixes.contains(trimmed) {
+            allowedShellPrefixes.append(trimmed)
+        }
+    }
+
+    /// Returns a snapshot of the current approval state for persistence.
+    /// `alwaysAllowed` is returned sorted for stable output.
+    func snapshot() -> (autoApproveAll: Bool, alwaysAllowed: [String], allowedShellPrefixes: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (autoApproveAll, alwaysAllowed.sorted(), allowedShellPrefixes)
+    }
+
     /// A human-readable summary for `/auto` and `/approvals`.
     func describe() -> String {
         lock.lock()

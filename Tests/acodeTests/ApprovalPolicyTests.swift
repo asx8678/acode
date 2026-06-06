@@ -48,6 +48,93 @@ import Testing
     #expect(denyRenderer.approve(denied) == false)
 }
 
+// MARK: - Runtime /allow + persistence
+
+@Test func test_allow_shell_prefix_runtime() {
+    let policy = ApprovalPolicy()
+    policy.allowShellPrefix("git push")
+    #expect(policy.shouldAutoApprove("run_shell", command: "git push") == true)
+    #expect(policy.shouldAutoApprove("run_shell", command: "git push --force") == true)
+    #expect(policy.shouldAutoApprove("run_shell", command: "git push; rm -rf /") == false)
+}
+
+@Test func test_allow_shell_prefix_dedupes() {
+    let policy = ApprovalPolicy()
+    policy.allowShellPrefix("git push")
+    policy.allowShellPrefix("git push")
+    policy.allowShellPrefix("  ")
+    let desc = policy.describe()
+    // "git push" should appear exactly once in the shell-allowlist.
+    let occurrences = desc.components(separatedBy: "git push").count - 1
+    #expect(occurrences == 1)
+}
+
+@Test func test_save_approvals_roundtrip() throws {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("acode-save-\(UUID().uuidString).json")
+    defer {
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + ".bak"))
+    }
+
+    let ok = saveApprovals(
+        autoApprove: true,
+        autoApproveTools: ["edit_file"],
+        autoApproveShell: ["git status", "swift build"],
+        to: url
+    )
+    #expect(ok == true)
+
+    let cfg = Config.load(from: url)
+    #expect(cfg.autoApprove == true)
+    #expect(cfg.autoApproveTools == ["edit_file"])
+    #expect(cfg.autoApproveShell == ["git status", "swift build"])
+}
+
+@Test func test_save_approvals_preserves_existing_keys_and_secret() throws {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("acode-secret-\(UUID().uuidString).json")
+    defer {
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + ".bak"))
+    }
+
+    let original = """
+    {
+      "defaultModel": "deepseek-v4-pro",
+      "models": {
+        "deepseek-v4-pro": {
+          "provider": "openai",
+          "apiKey": "sk-secret-1234"
+        }
+      }
+    }
+    """
+    try original.data(using: .utf8)!.write(to: url)
+
+    let ok = saveApprovals(
+        autoApprove: false,
+        autoApproveTools: ["run_shell"],
+        autoApproveShell: ["git status"],
+        to: url
+    )
+    #expect(ok == true)
+
+    let data = try Data(contentsOf: url)
+    let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    #expect(root?["defaultModel"] as? String == "deepseek-v4-pro")
+    let models = root?["models"] as? [String: Any]
+    let entry = models?["deepseek-v4-pro"] as? [String: Any]
+    #expect(entry?["apiKey"] as? String == "sk-secret-1234")
+    #expect(entry?["provider"] as? String == "openai")
+    #expect(root?["autoApprove"] as? Bool == false)
+    #expect(root?["autoApproveTools"] as? [String] == ["run_shell"])
+    #expect(root?["autoApproveShell"] as? [String] == ["git status"])
+
+    // Backup file was created.
+    #expect(FileManager.default.fileExists(atPath: url.path + ".bak") == true)
+}
+
 // MARK: - Shell allowlist
 
 @Test func test_shell_allowlist_exact_match() {

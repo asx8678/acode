@@ -158,7 +158,7 @@ struct Acode: AsyncParsableCommand {
             case .slash(let command):
                 switch command {
                 case "help":
-                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>, /auto [on|off], /approvals. Prefix ! to run a shell command; anything else is a task.")
+                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>, /auto [on|off], /allow <cmd>, /approvals [save]. Prefix ! to run a shell command; anything else is a task.")
                 case "clear":
                     agent.reset()
                     print("Conversation history cleared.")
@@ -195,8 +195,38 @@ struct Acode: AsyncParsableCommand {
                         default:
                             print("Usage: /auto [on|off]")
                         }
-                    } else if command == "approvals" {
-                        print(policy.describe())
+                    } else if command == "allow" || command.hasPrefix("allow ") {
+                        let prefix = command.dropFirst("allow".count).trimmingCharacters(in: .whitespaces)
+                        if prefix.isEmpty {
+                            print("Usage: /allow <command prefix> (e.g. /allow git push)")
+                        } else {
+                            policy.allowShellPrefix(prefix)
+                            print("Shell commands matching \"\(prefix)\" will be auto-approved this session.")
+                        }
+                    } else if command == "approvals" || command.hasPrefix("approvals ") {
+                        let arg = command.dropFirst("approvals".count).trimmingCharacters(in: .whitespaces).lowercased()
+                        switch arg {
+                        case "":
+                            print(policy.describe())
+                        case "save":
+                            let snap = policy.snapshot()
+                            let path = ("~/.config/acode/config.json" as NSString).expandingTildeInPath
+                            let url = URL(fileURLWithPath: path)
+                            let ok = saveApprovals(
+                                autoApprove: snap.autoApproveAll,
+                                autoApproveTools: snap.alwaysAllowed,
+                                autoApproveShell: snap.allowedShellPrefixes,
+                                to: url
+                            )
+                            if ok {
+                                print("Saved approvals to \(path):")
+                                print("  \(policy.describe())")
+                            } else {
+                                print("Error: failed to save approvals to \(path).")
+                            }
+                        default:
+                            print("Usage: /approvals [save]")
+                        }
                     } else if command == "model" || command.hasPrefix("model ") {
                         let name = command.dropFirst("model".count).trimmingCharacters(in: .whitespaces)
                         if name.isEmpty {
