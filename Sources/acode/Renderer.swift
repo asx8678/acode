@@ -50,8 +50,15 @@ nonisolated final class Spinner: @unchecked Sendable {
 /// Renders agent output to stdout. Nonisolated and Sendable; no actor.
 struct Renderer: Sendable {
     let color: Bool
-    let autoApprove: Bool
     var verbose: Bool
+    /// Shared session approval state so copies of this struct remember choices.
+    let policy: ApprovalPolicy
+
+    init(color: Bool, verbose: Bool, policy: ApprovalPolicy = ApprovalPolicy()) {
+        self.color = color
+        self.verbose = verbose
+        self.policy = policy
+    }
 
     /// Centralized color rule: color only on a TTY with NO_COLOR unset.
     static func colorEnabled(isTTY: Bool, noColor: Bool) -> Bool {
@@ -134,13 +141,23 @@ struct Renderer: Sendable {
         print(paint("● \(p)", "36"))
     }
 
-    /// Returns true under auto-approve; otherwise reads a y/n line (default no).
+    /// Returns true under auto-approve or a remembered allow-always; otherwise
+    /// reads a `y/N/a` line (default no). `a`/`all`/`always` allows the tool for
+    /// the rest of the session via the shared policy.
     nonisolated func approve(_ c: ToolCall) -> Bool {
-        if autoApprove { return true }
-        print("Approve \(c.name)? [y/N] ", terminator: "")
+        if policy.shouldAutoApprove(c.name, command: c.arguments["command"]?.stringValue) { return true }
+        print("Approve \(c.name)? [y/N/a] ", terminator: "")
         guard let line = readLine() else { return false }
         let answer = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return answer == "y" || answer == "yes"
+        switch answer {
+        case "y", "yes":
+            return true
+        case "a", "all", "always":
+            policy.allowAlways(c.name)
+            return true
+        default:
+            return false
+        }
     }
 
     nonisolated func spinner(_ label: String) -> Spinner {

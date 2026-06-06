@@ -264,8 +264,8 @@ Operating rules:
 ```swift
 struct Renderer: Sendable {                          // nonisolated; writes to stdout; no actor
     let color: Bool                                  // isatty(STDOUT) && NO_COLOR unset
-    let autoApprove: Bool                            // --yes
     var verbose: Bool
+    let policy: ApprovalPolicy                        // shared session approval state — the single approval gate
     func banner()
     func streamText(_ s: String)                     // no trailing newline
     func endAssistant()
@@ -273,11 +273,17 @@ struct Renderer: Sendable {                          // nonisolated; writes to s
     func toolEnd(_ c: ToolCall, _ r: ToolResult)     // green "✓ name" / red "✗ name"
     func usage(_ u: Usage)                           // only when verbose: "· in+out tok"
     func phase(_ p: String)                          // cyan "● <phase>"  (multi-agent)
-    func approve(_ c: ToolCall) -> Bool              // autoApprove ? true : readLine y/n
+    func approve(_ c: ToolCall) -> Bool              // policy.shouldAutoApprove ? true : readLine [y/N/a]
     func spinner(_ label: String) -> Spinner
 }
 final class Spinner { @discardableResult func start() -> Spinner; func stop() }
 ```
+
+> Approval state lives in `ApprovalPolicy` (a lock-guarded reference type) shared
+> across copied `Renderer` values so "always allow" decisions persist for the
+> session. It is the single approval gate: `--yes` and the config keys
+> `autoApprove` (blanket), `autoApproveTools` (per-tool), and `autoApproveShell`
+> (a metacharacter-filtered `run_shell` command allowlist) seed it.
 
 ### CLI — `main.swift`, `Config.swift`
 

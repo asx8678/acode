@@ -134,7 +134,12 @@ struct Acode: AsyncParsableCommand {
             isTTY: isatty(STDOUT_FILENO) != 0,
             noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
         )
-        let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        let policy = ApprovalPolicy(
+            autoApproveAll: yes || (cfg.autoApprove ?? false),
+            alwaysAllowed: Set(cfg.autoApproveTools ?? []),
+            allowedShellPrefixes: cfg.autoApproveShell ?? []
+        )
+        let renderer = Renderer(color: color, verbose: verbose, policy: policy)
         renderer.verboseLog("Model: \(resolvedModel)")
         renderer.verboseLog("Provider: \(providerName(provider))")
         let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: renderer)
@@ -153,7 +158,7 @@ struct Acode: AsyncParsableCommand {
             case .slash(let command):
                 switch command {
                 case "help":
-                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>. Prefix ! to run a shell command; anything else is a task.")
+                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>, /auto [on|off], /approvals. Prefix ! to run a shell command; anything else is a task.")
                 case "clear":
                     agent.reset()
                     print("Conversation history cleared.")
@@ -176,6 +181,22 @@ struct Acode: AsyncParsableCommand {
                                 print(result)
                             }, renderer: renderer)
                         }
+                    } else if command == "auto" || command.hasPrefix("auto ") {
+                        let arg = command.dropFirst("auto".count).trimmingCharacters(in: .whitespaces).lowercased()
+                        switch arg {
+                        case "":
+                            print(policy.describe())
+                        case "on":
+                            policy.setAutoApproveAll(true)
+                            print("Auto-approve-all is now on.")
+                        case "off":
+                            policy.setAutoApproveAll(false)
+                            print("Auto-approve-all is now off.")
+                        default:
+                            print("Usage: /auto [on|off]")
+                        }
+                    } else if command == "approvals" {
+                        print(policy.describe())
                     } else if command == "model" || command.hasPrefix("model ") {
                         let name = command.dropFirst("model".count).trimmingCharacters(in: .whitespaces)
                         if name.isEmpty {
@@ -220,7 +241,12 @@ struct Acode: AsyncParsableCommand {
             isTTY: isatty(STDOUT_FILENO) != 0,
             noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
         )
-        let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        let policy = ApprovalPolicy(
+            autoApproveAll: yes || (cfg.autoApprove ?? false),
+            alwaysAllowed: Set(cfg.autoApproveTools ?? []),
+            allowedShellPrefixes: cfg.autoApproveShell ?? []
+        )
+        let renderer = Renderer(color: color, verbose: verbose, policy: policy)
         renderer.verboseLog("Model: \(resolvedModel)")
         renderer.verboseLog("Provider: \(providerName(provider))")
         return try await runOneShot(prompt: prompt, provider: provider, tools: tools, renderer: renderer)
@@ -245,7 +271,12 @@ struct Acode: AsyncParsableCommand {
             isTTY: isatty(STDOUT_FILENO) != 0,
             noColor: ProcessInfo.processInfo.environment["NO_COLOR"] != nil
         )
-        let renderer = Renderer(color: color, autoApprove: yes, verbose: verbose)
+        let policy = ApprovalPolicy(
+            autoApproveAll: yes || (cfg.autoApprove ?? false),
+            alwaysAllowed: Set(cfg.autoApproveTools ?? []),
+            allowedShellPrefixes: cfg.autoApproveShell ?? []
+        )
+        let renderer = Renderer(color: color, verbose: verbose, policy: policy)
         renderer.verboseLog("Model: \(resolvedModel)")
         renderer.verboseLog("Provider: \(providerName(provider))")
 

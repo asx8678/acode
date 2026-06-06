@@ -30,21 +30,34 @@ struct Config: Codable {
     var models: [String: ModelEntry] = [:]
     /// Role name → model id override (e.g. `"planner"` → `"claude-opus-4-5"`).
     var roleModels: [String: String]?
+    /// Opt-in blanket auto-approve for every approval-gated tool.
+    var autoApprove: Bool?
+    /// Opt-in granular auto-approve for specific tools (e.g. `["run_shell"]`).
+    var autoApproveTools: [String]?
+    /// Opt-in allowlist of safe shell command prefixes (e.g. `["git status"]`).
+    var autoApproveShell: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case defaultModel, defaultProvider, models, roleModels
+        case autoApprove, autoApproveTools, autoApproveShell
     }
 
     init(
         defaultModel: String? = nil,
         defaultProvider: String? = nil,
         models: [String: ModelEntry] = [:],
-        roleModels: [String: String]? = nil
+        roleModels: [String: String]? = nil,
+        autoApprove: Bool? = nil,
+        autoApproveTools: [String]? = nil,
+        autoApproveShell: [String]? = nil
     ) {
         self.defaultModel = defaultModel
         self.defaultProvider = defaultProvider
         self.models = models
         self.roleModels = roleModels
+        self.autoApprove = autoApprove
+        self.autoApproveTools = autoApproveTools
+        self.autoApproveShell = autoApproveShell
     }
 
     init(from decoder: Decoder) throws {
@@ -53,6 +66,9 @@ struct Config: Codable {
         defaultProvider = try container.decodeIfPresent(String.self, forKey: .defaultProvider)
         models = try container.decodeIfPresent([String: ModelEntry].self, forKey: .models) ?? [:]
         roleModels = try container.decodeIfPresent([String: String].self, forKey: .roleModels)
+        autoApprove = try container.decodeIfPresent(Bool.self, forKey: .autoApprove)
+        autoApproveTools = try container.decodeIfPresent([String].self, forKey: .autoApproveTools)
+        autoApproveShell = try container.decodeIfPresent([String].self, forKey: .autoApproveShell)
     }
 
     /// Loads config from `~/.config/acode/config.json`, tolerating a missing or

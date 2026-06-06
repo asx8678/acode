@@ -49,7 +49,7 @@ import Testing
 
     var tools = ToolRegistry()
     registerStandardTools(&tools)
-    let renderer = Renderer(color: false, autoApprove: true, verbose: false)
+    let renderer = Renderer(color: false, verbose: false, policy: ApprovalPolicy(autoApproveAll: true))
     let orchestrator = Orchestrator()
 
     let answer = try await orchestrator.run(
@@ -79,7 +79,7 @@ import Testing
 
     var tools = ToolRegistry()
     registerStandardTools(&tools)
-    let renderer = Renderer(color: false, autoApprove: true, verbose: false)
+    let renderer = Renderer(color: false, verbose: false, policy: ApprovalPolicy(autoApproveAll: true))
     let orchestrator = Orchestrator()
 
     let answer = try await orchestrator.run(

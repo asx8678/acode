@@ -23,7 +23,7 @@ import Testing
 
     var tools = ToolRegistry()
     registerStandardTools(&tools)
-    let renderer = Renderer(color: false, autoApprove: true, verbose: false)
+    let renderer = Renderer(color: false, verbose: false, policy: ApprovalPolicy(autoApproveAll: true))
 
     let answer = try await runOneShot(
         prompt: "read \(name) and tell me what it does",

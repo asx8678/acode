@@ -28,7 +28,7 @@ private struct RecordingTool: Tool {
 private func makeAgent(provider: any LLMProvider, flag: RanFlag) -> Agent {
     var registry = ToolRegistry()
     registry.register(RecordingTool(flag: flag))
-    let renderer = Renderer(color: false, autoApprove: true, verbose: false)
+    let renderer = Renderer(color: false, verbose: false, policy: ApprovalPolicy(autoApproveAll: true))
     return Agent(profile: .generalist, provider: provider, tools: registry, renderer: renderer)
 }
 
