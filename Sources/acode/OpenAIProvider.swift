@@ -8,11 +8,26 @@ nonisolated let defaultOpenAIModel = "gpt-4o"
 nonisolated let defaultOpenAIBaseURL = "https://api.openai.com/v1"
 
 /// Errors surfaced by the OpenAI provider.
-enum OpenAIError: Error {
+enum OpenAIError: Error, CustomStringConvertible {
     case missingAPIKey
-    case httpStatus(Int)
+    case httpStatus(Int, message: String)
     case malformedResponse
     case invalidBaseURL(String)
+
+    var description: String {
+        switch self {
+        case .missingAPIKey:
+            return "OPENAI_API_KEY is not set."
+        case .httpStatus(let code, let message):
+            return message.isEmpty
+                ? "OpenAI API error (HTTP \(code))."
+                : "OpenAI API error (HTTP \(code)): \(message)"
+        case .malformedResponse:
+            return "Malformed response from the OpenAI API."
+        case .invalidBaseURL(let url):
+            return "Invalid base URL: \(url)"
+        }
+    }
 }
 
 /// An `LLMProvider` backed by the OpenAI Responses API with a Chat Completions
@@ -60,7 +75,7 @@ struct OpenAIProvider: LLMProvider {
                 system: system, messages: messages, tools: tools, model: resolvedModel
             )
             return try await openStream(path: "responses", body: body, key: key, kind: .responses)
-        } catch OpenAIError.httpStatus(404) {
+        } catch OpenAIError.httpStatus(404, _) {
             let body = Self.makeChatRequestBody(
                 system: system, messages: messages, tools: tools, model: resolvedModel
             )
@@ -100,7 +115,10 @@ struct OpenAIProvider: LLMProvider {
             throw OpenAIError.malformedResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw OpenAIError.httpStatus(http.statusCode)
+            // A 404 here triggers the Responses→Chat fallback in `stream`, so
+            // skip the body read on that path; otherwise surface the reason.
+            let message = http.statusCode == 404 ? "" : await ProviderError.body(from: bytes)
+            throw OpenAIError.httpStatus(http.statusCode, message: message)
         }
 
         return AsyncThrowingStream { continuation in

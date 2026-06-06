@@ -22,15 +22,28 @@ private nonisolated final class OutputBuffer: @unchecked Sendable {
 private nonisolated final class ProcessBox: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
+    private var cancelled = false
 
-    nonisolated func set(_ p: Process) {
+    /// Stores the process, returning `false` if cancellation already arrived —
+    /// so the caller skips launching a command that was cancelled before the
+    /// process was registered (closing the cancel-before-`set` race).
+    nonisolated func set(_ p: Process) -> Bool {
         lock.lock()
+        defer { lock.unlock() }
+        if cancelled { return false }
         process = p
-        lock.unlock()
+        return true
+    }
+
+    nonisolated var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
     }
 
     nonisolated func terminate() {
         lock.lock()
+        cancelled = true
         process?.terminate()
         lock.unlock()
     }
@@ -106,7 +119,10 @@ struct RunShellTool: Tool {
             }
         }
 
-        box.set(process)
+        guard box.set(process) else {
+            readHandle.readabilityHandler = nil
+            return ToolOutput(output: "Cancelled.", isError: true)
+        }
         do {
             try process.run()
         } catch {
@@ -115,6 +131,11 @@ struct RunShellTool: Tool {
                 output: "Could not launch shell: \(error.localizedDescription)",
                 isError: true
             )
+        }
+        // Cancellation that landed between `set` and `run` would have hit a
+        // not-yet-started process; terminate now that it is running.
+        if box.isCancelled {
+            process.terminate()
         }
 
         let timeoutItem = DispatchWorkItem { box.terminate() }

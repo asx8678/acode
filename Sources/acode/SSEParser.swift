@@ -31,8 +31,12 @@ nonisolated final class ResponseAssembler {
         case "message_start":
             if
                 let message = root["message"] as? [String: Any],
-                let usageObject = message["usage"] as? [String: Any],
-                let input = usageObject["input_tokens"] as? Int {
+                let usageObject = message["usage"] as? [String: Any] {
+                // Include cache-creation/read tokens so the reported input count
+                // reflects the full prompt, not just the uncached portion.
+                var input = usageObject["input_tokens"] as? Int ?? 0
+                input += usageObject["cache_creation_input_tokens"] as? Int ?? 0
+                input += usageObject["cache_read_input_tokens"] as? Int ?? 0
                 usage.input = input
             }
             return []

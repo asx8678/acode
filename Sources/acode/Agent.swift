@@ -16,8 +16,8 @@ private nonisolated let retryableStatusCodes: Set<Int> = [429, 500, 502, 503, 52
 /// Returns `nil` for non-HTTP errors (e.g. transport failures), which are
 /// treated as transient and therefore retriable.
 private func httpStatus(of error: Error) -> Int? {
-    if case AnthropicError.httpStatus(let code) = error { return code }
-    if case OpenAIError.httpStatus(let code) = error { return code }
+    if case AnthropicError.httpStatus(let code, _) = error { return code }
+    if case OpenAIError.httpStatus(let code, _) = error { return code }
     return nil
 }
 

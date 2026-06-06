@@ -62,7 +62,7 @@ private nonisolated func retryFailingTwice(_ counter: Counter) async throws -> S
     try await connectWithRetry(max: 3) {
         let attempt = counter.increment()
         if attempt < 3 {
-            throw AnthropicError.httpStatus(503)
+            throw AnthropicError.httpStatus(503, message: "")
         }
         return "ok"
     }
@@ -79,8 +79,19 @@ private nonisolated func retryAlwaysCancelling() async throws -> String {
 private nonisolated func retryNonRetryable(_ counter: Counter) async throws -> String {
     try await connectWithRetry(max: 3) {
         _ = counter.increment()
-        throw AnthropicError.httpStatus(400)
+        throw AnthropicError.httpStatus(400, message: "bad request")
     }
+}
+
+@Test func test_http_error_descriptions_carry_status_and_body() {
+    let anthropic = String(describing: AnthropicError.httpStatus(429, message: "rate limited"))
+    #expect(anthropic.contains("429"))
+    #expect(anthropic.contains("rate limited"))
+
+    // An empty body still names the status without a dangling colon.
+    let openai = String(describing: OpenAIError.httpStatus(400, message: ""))
+    #expect(openai.contains("400"))
+    #expect(!openai.contains(": "))
 }
 
 @Test func test_retry_succeeds_after_failures() async throws {

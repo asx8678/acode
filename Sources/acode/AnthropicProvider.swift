@@ -7,10 +7,23 @@ nonisolated let defaultAnthropicModel = "claude-sonnet-4-5"
 private nonisolated let anthropicMaxTokens = 4096
 
 /// Errors surfaced by the Anthropic provider.
-enum AnthropicError: Error {
+enum AnthropicError: Error, CustomStringConvertible {
     case missingAPIKey
-    case httpStatus(Int)
+    case httpStatus(Int, message: String)
     case malformedResponse
+
+    var description: String {
+        switch self {
+        case .missingAPIKey:
+            return "ANTHROPIC_API_KEY is not set."
+        case .httpStatus(let code, let message):
+            return message.isEmpty
+                ? "Anthropic API error (HTTP \(code))."
+                : "Anthropic API error (HTTP \(code)): \(message)"
+        case .malformedResponse:
+            return "Malformed response from the Anthropic API."
+        }
+    }
 }
 
 /// An `LLMProvider` backed by the Anthropic Messages API over SSE streaming.
@@ -56,7 +69,8 @@ struct AnthropicProvider: LLMProvider {
             throw AnthropicError.malformedResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw AnthropicError.httpStatus(http.statusCode)
+            let message = await ProviderError.body(from: bytes)
+            throw AnthropicError.httpStatus(http.statusCode, message: message)
         }
 
         return AsyncThrowingStream { continuation in
