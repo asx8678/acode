@@ -79,8 +79,24 @@ extension JSONValue {
 // MARK: - Conversation
 
 /// The running message history for an agent turn.
-struct Conversation {
+struct Conversation: Codable {
     private(set) var messages: [Message] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case messages
+    }
+
+    init() {}
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        messages = try container.decode([Message].self, forKey: .messages)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(messages, forKey: .messages)
+    }
 
     mutating func append(_ m: Message) {
         messages.append(m)

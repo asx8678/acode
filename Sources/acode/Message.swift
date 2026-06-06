@@ -6,24 +6,68 @@ enum Role: String, Codable, Sendable {
 }
 
 /// A model-requested invocation of a registered tool.
-struct ToolCall: Codable, Sendable, Identifiable {
+struct ToolCall: Codable, Sendable, Identifiable, Equatable {
     let id: String
     let name: String
     let arguments: JSONValue
 }
 
 /// The outcome of executing a `ToolCall`.
-struct ToolResult: Codable, Sendable {
+struct ToolResult: Codable, Sendable, Equatable {
     let callID: String
     let output: String
     let isError: Bool
 }
 
 /// A single turn in the conversation history.
-enum Message: Sendable {
+enum Message: Sendable, Equatable, Codable {
     case user(String)
     case assistant(text: String, toolCalls: [ToolCall])
     case toolResults([ToolResult])
+
+    private enum CodingKeys: String, CodingKey {
+        case role
+        case content
+        case toolCalls = "tool_calls"
+        case toolResults = "tool_results"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let role = try container.decode(Role.self, forKey: .role)
+        switch role {
+        case .user:
+            self = .user(try container.decode(String.self, forKey: .content))
+        case .assistant:
+            let text = try container.decode(String.self, forKey: .content)
+            let toolCalls = try container.decode([ToolCall].self, forKey: .toolCalls)
+            self = .assistant(text: text, toolCalls: toolCalls)
+        case .tool:
+            self = .toolResults(try container.decode([ToolResult].self, forKey: .toolResults))
+        case .system:
+            throw DecodingError.dataCorruptedError(
+                forKey: .role,
+                in: container,
+                debugDescription: "Unsupported message role: system."
+            )
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .user(let text):
+            try container.encode(Role.user, forKey: .role)
+            try container.encode(text, forKey: .content)
+        case .assistant(let text, let toolCalls):
+            try container.encode(Role.assistant, forKey: .role)
+            try container.encode(text, forKey: .content)
+            try container.encode(toolCalls, forKey: .toolCalls)
+        case .toolResults(let results):
+            try container.encode(Role.tool, forKey: .role)
+            try container.encode(results, forKey: .toolResults)
+        }
+    }
 }
 
 /// A minimal JSON value model used for tool arguments and JSON-Schema fragments.

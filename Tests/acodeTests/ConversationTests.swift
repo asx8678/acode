@@ -101,3 +101,82 @@ private func assertPairsIntact(_ messages: [Message]) {
     let total = result.reduce(0) { $0 + $1.tokenEstimate }
     #expect(total <= window)
 }
+
+// MARK: - Serialization (P1)
+
+@Test func test_message_codable_roundtrip() throws {
+    // User message
+    let userMsg = Message.user("hello world")
+    let userData = try JSONEncoder().encode(userMsg)
+    let userDecoded = try JSONDecoder().decode(Message.self, from: userData)
+    #expect(userDecoded == userMsg)
+
+    // Assistant message with tool calls
+    let toolCall = ToolCall(id: "call_1", name: "read_file", arguments: .object(["path": .string("/tmp/test.txt")]))
+    let asstMsg = Message.assistant(text: "Let me read that file.", toolCalls: [toolCall])
+    let asstData = try JSONEncoder().encode(asstMsg)
+    let asstDecoded = try JSONDecoder().decode(Message.self, from: asstData)
+    #expect(asstDecoded == asstMsg)
+
+    // Tool results
+    let results = [ToolResult(callID: "call_1", output: "file contents here", isError: false)]
+    let toolMsg = Message.toolResults(results)
+    let toolData = try JSONEncoder().encode(toolMsg)
+    let toolDecoded = try JSONDecoder().decode(Message.self, from: toolData)
+    #expect(toolDecoded == toolMsg)
+}
+
+@Test func test_conversation_codable_roundtrip() throws {
+    var convo = Conversation()
+    convo.append(.user("read /tmp/test.txt"))
+    convo.append(.assistant(
+        text: "I'll read it.",
+        toolCalls: [ToolCall(id: "c1", name: "read_file", arguments: .object(["path": .string("/tmp/test.txt")]))]
+    ))
+    convo.append(.toolResults([ToolResult(callID: "c1", output: "hello", isError: false)]))
+    convo.append(.assistant(text: "The file contains 'hello'.", toolCalls: []))
+
+    let data = try JSONEncoder().encode(convo)
+    let decoded = try JSONDecoder().decode(Conversation.self, from: data)
+    #expect(decoded.messages.count == 4)
+    // Verify B2: tool-call/tool-result pairing preserved
+    // Message 1 is assistant with toolCalls, message 2 should be toolResults
+    if case .assistant(_, let calls) = decoded.messages[1] {
+        #expect(calls.first?.id == "c1")
+    } else {
+        Issue.record("Expected assistant message at index 1")
+    }
+    if case .toolResults(let results) = decoded.messages[2] {
+        #expect(results.first?.callID == "c1")
+    } else {
+        Issue.record("Expected toolResults at index 2")
+    }
+}
+
+@Test func test_session_save_load() throws {
+    let tmpDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("acode-test-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+    // We can't easily override sessionsDir, so we test the encode/decode path directly
+    var convo = Conversation()
+    convo.append(.user("test message"))
+    convo.append(.assistant(text: "response", toolCalls: []))
+
+    let session = Session(
+        id: "test-session-1",
+        title: "Test Session",
+        model: "claude-sonnet-4-5",
+        createdAt: Date(timeIntervalSince1970: 1000),
+        updatedAt: Date(timeIntervalSince1970: 2000),
+        conversation: convo
+    )
+
+    let data = try JSONEncoder().encode(session)
+    let decoded = try JSONDecoder().decode(Session.self, from: data)
+
+    #expect(decoded.id == "test-session-1")
+    #expect(decoded.title == "Test Session")
+    #expect(decoded.model == "claude-sonnet-4-5")
+    #expect(decoded.conversation.messages.count == 2)
+}
