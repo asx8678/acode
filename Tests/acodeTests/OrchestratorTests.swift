@@ -36,6 +36,15 @@ import Testing
     }
 }
 
+@Test func test_verdict_tolerates_punctuation_and_emphasis() {
+    for line in ["VERDICT: APPROVED.", "**VERDICT: APPROVED**", "verdict:  approved"] {
+        guard case .approved = Verdict.parse(from: "Looks good\n\(line)") else {
+            Issue.record("Expected .approved for last line: \(line)")
+            return
+        }
+    }
+}
+
 @MainActor
 @Test func test_orchestrator_converges() async throws {
     let provider = FakeProvider(scripts: [

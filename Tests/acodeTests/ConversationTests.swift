@@ -102,6 +102,20 @@ private func assertPairsIntact(_ messages: [Message]) {
     #expect(total <= window)
 }
 
+@Test func test_compaction_never_empties_on_oversized_tool_result() {
+    // A tool result larger than the window must not be split from its
+    // tool_use partner and dropped, which would leave an empty message list.
+    var convo = Conversation()
+    convo.append(.user("do a thing"))
+    convo.append(.assistant(text: "", toolCalls: [toolCall("c1")]))
+    convo.append(.toolResults([toolResult("c1", output: String(repeating: "r", count: 100_000))]))
+
+    let window = 10  // forces step 4 with a single oversized pair
+    let result = convo.compacted(for: window)
+    #expect(!result.isEmpty)
+    assertPairsIntact(result)
+}
+
 // MARK: - Serialization (P1)
 
 @Test func test_message_codable_roundtrip() throws {

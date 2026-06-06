@@ -108,9 +108,12 @@ struct Conversation: Codable {
     /// 1. `reserve = window * 7 / 10`.
     /// 2. Truncate each message to `reserve` so no single message blows the budget.
     /// 3. If the truncated set fits within `window`, return it.
-    /// 4. Otherwise keep newest-first whole messages until `reserve` tokens
-    ///    (always keeping at least one message).
-    /// 5. Drop orphaned tool_use/tool_result pairs so invariant B2 holds.
+    /// 4. Otherwise keep newest-first until `reserve` tokens, treating a
+    ///    tool_use/tool_result pair as one atomic unit (always keeping at
+    ///    least the newest unit). Keeping pairs together stops the budget from
+    ///    splitting one half off, which step 5 would then drop — leaving an
+    ///    empty list that both provider APIs reject.
+    /// 5. Drop any orphaned tool_use/tool_result pairs so invariant B2 holds.
     func compacted(for window: Int) -> [Message] {
         guard window > 0 else { return ensureToolPairsIntact(messages) }
 
@@ -124,13 +127,31 @@ struct Conversation: Codable {
             return ensureToolPairsIntact(truncated)
         }
 
-        // Step 4: keep newest-first whole messages until we hit `reserve`.
+        // Step 4: keep newest-first until we hit `reserve`, pulling each
+        // `.toolResults` together with its preceding assistant tool_use so a
+        // pair is admitted (or rejected) as a unit. `kept` is built newest-first
+        // and reversed at the end.
         var kept: [Message] = []
         var used = 0
-        for message in truncated.reversed() {
-            let cost = message.tokenEstimate
+        var index = truncated.count - 1
+        while index >= 0 {
+            // Form the next unit: a tool_result drags in its tool_use partner.
+            let unit: [Message]
+            if case .toolResults = truncated[index],
+                index > 0,
+                case .assistant(_, let calls) = truncated[index - 1],
+                !calls.isEmpty
+            {
+                unit = [truncated[index - 1], truncated[index]]
+                index -= 2
+            } else {
+                unit = [truncated[index]]
+                index -= 1
+            }
+
+            let cost = unit.reduce(0) { $0 + $1.tokenEstimate }
             if kept.isEmpty || used + cost <= reserve {
-                kept.append(message)
+                kept.append(contentsOf: unit.reversed())  // building newest-first
                 used += cost
             } else {
                 break

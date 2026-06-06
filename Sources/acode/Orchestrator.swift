@@ -7,23 +7,28 @@ enum Verdict: Sendable {
 
     /// Parses the verdict from the reviewer's full output.
     ///
-    /// Only the last non-empty line is examined:
-    /// - `"VERDICT: APPROVED"` (case-insensitive) → ``approved``
-    /// - `"VERDICT: CHANGES"` (case-insensitive) → ``changes`` with the full
-    ///   output as feedback
-    /// - Anything else → ``changes`` (treat the full output as feedback)
+    /// Only the last non-empty line is examined (so a `VERDICT: APPROVED`
+    /// buried mid-text never approves), but matching within that line is
+    /// lenient: it is uppercased and its internal whitespace collapsed, then
+    /// tested for the `VERDICT: APPROVED` substring. This tolerates trailing
+    /// punctuation, markdown emphasis (`**VERDICT: APPROVED**`), and irregular
+    /// spacing that real model output routinely produces.
+    /// - Anything else → ``changes`` (treat the full output as feedback).
     nonisolated static func parse(from output: String) -> Verdict {
         let lastLine = output
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .last { !$0.isEmpty } ?? ""
 
-        switch lastLine.uppercased() {
-        case "VERDICT: APPROVED":
+        let normalized = lastLine
+            .uppercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+
+        if normalized.contains("VERDICT: APPROVED") {
             return .approved
-        default:
-            return .changes(feedback: output)
         }
+        return .changes(feedback: output)
     }
 }
 
