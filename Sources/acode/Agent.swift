@@ -3,7 +3,6 @@ import Foundation
 /// Errors raised by the agent loop.
 enum AgentError: Error {
     case stepLimit
-    case outsideProject(String)
 }
 
 /// Maximum tool/answer iterations per turn (invariant B1).

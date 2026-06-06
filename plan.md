@@ -154,7 +154,7 @@ final class ResponseAssembler { func ingest(_ ssePayload: String) -> [StreamEven
 ### Tools — `Tools.swift`, `ProjectJail.swift`, `FileTools.swift`, `RunShell.swift`, `Skills.swift`
 
 ```swift
-struct ToolOutput: Sendable { var output: String; var isError = false; var summary = "" }
+struct ToolOutput: Sendable { var output: String; var isError = false }
 
 protocol Tool: Sendable {
     static var schema: ToolSchema { get }
@@ -198,7 +198,7 @@ dispatch queue inside `withCheckedContinuation`); output capped to the last 256 
 ### Agent loop — `Agent.swift`
 
 ```swift
-enum AgentError: Error { case stepLimit, outsideProject(String) }
+enum AgentError: Error { case stepLimit }
 
 @MainActor
 final class Agent {

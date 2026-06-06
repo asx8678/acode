@@ -2,9 +2,8 @@ import Foundation
 
 /// Error thrown when a path resolves outside the project root.
 ///
-/// `AgentError` is not defined until T0.8; file tools (T0.5) convert thrown
-/// errors into `ToolOutput(isError: true)` per invariant B3, so the concrete
-/// error type here is not load-bearing.
+/// File tools convert thrown errors into `ToolOutput(isError: true)` per
+/// invariant B3, so the concrete error type here is not load-bearing.
 enum ProjectJailError: Error {
     case outsideProject(String)
 }

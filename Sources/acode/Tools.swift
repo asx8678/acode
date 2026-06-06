@@ -4,7 +4,6 @@ import Foundation
 struct ToolOutput: Sendable {
     var output: String
     var isError = false
-    var summary = ""
 }
 
 /// A capability the model can invoke. `run` must not throw (invariant B3);
