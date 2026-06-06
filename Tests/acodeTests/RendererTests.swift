@@ -30,3 +30,29 @@ import Testing
     let normal = "Model: claude-sonnet, 3 messages, 5 tools"
     #expect(Renderer.redactKeys(in: normal) == normal)
 }
+
+@Test func test_approval_description_shows_shell_command() {
+    let call = ToolCall(
+        id: "t1",
+        name: "run_shell",
+        arguments: .object(["command": .string("rm -rf build")])
+    )
+    let description = Renderer.approvalDescription(call)
+    #expect(description.contains("rm -rf build"))
+}
+
+@Test func test_approval_description_shows_edit_path() {
+    let call = ToolCall(
+        id: "t2",
+        name: "edit_file",
+        arguments: .object([
+            "path": .string("src/main.swift"),
+            "old_str": .string("old line"),
+            "new_str": .string("new line")
+        ])
+    )
+    let description = Renderer.approvalDescription(call)
+    #expect(description.contains("src/main.swift"))
+    #expect(description.contains("old line"))
+    #expect(description.contains("new line"))
+}

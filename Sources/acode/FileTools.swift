@@ -269,7 +269,7 @@ struct EditFileTool: Tool {
             parameters: Schema.object(
                 [
                     "path": (type: "string", description: "Path to the file, relative to the project root."),
-                    "old_str": (type: "string", description: "Exact text to replace. Empty or omitted creates/overwrites the file."),
+                    "old_str": (type: "string", description: "Exact text to replace. Empty or omitted creates the file only if it does not already exist; it will NOT overwrite an existing file."),
                     "new_str": (type: "string", description: "Replacement text (or the file's contents in create mode).")
                 ],
                 required: ["path", "new_str"]
@@ -290,10 +290,21 @@ struct EditFileTool: Tool {
             let url = try ProjectJail.resolve(path)
             let fileExists = FileManager.default.fileExists(atPath: url.path)
 
-            // Create mode: missing file or empty old_str.
-            if !fileExists || oldStr.isEmpty {
+            // Create mode: only when the file does not yet exist.
+            if !fileExists {
                 try Self.atomicWrite(newStr, to: url)
-                return ToolOutput(output: "Wrote \(path) (\(newStr.count) bytes).")
+                return ToolOutput(output: "Created \(path) (\(newStr.count) bytes).")
+            }
+
+            // The file exists. An empty old_str is ambiguous and would replace
+            // the entire file, so refuse it rather than silently clobbering the
+            // contents — the caller must name the exact text to replace.
+            if oldStr.isEmpty {
+                return ToolOutput(
+                    output: "\(path) already exists; provide a non-empty old_str naming the exact text to replace "
+                        + "(an empty old_str would overwrite the whole file).",
+                    isError: true
+                )
             }
 
             let content = try String(contentsOf: url, encoding: .utf8)

@@ -51,6 +51,13 @@ func connectWithRetry<T>(max: Int, _ make: () async throws -> T) async throws ->
         } catch {
             lastError = error
 
+            // Cancellation surfaces as URLError.cancelled (not CancellationError)
+            // when URLSession tears the request down; treat it as cancellation so
+            // Ctrl-C aborts immediately instead of triggering a backoff + retry.
+            if (error as? URLError)?.code == .cancelled || Task.isCancelled {
+                throw CancellationError()
+            }
+
             // Permanent configuration errors fail fast (never retried).
             if isPermanentConfigError(error) {
                 throw error

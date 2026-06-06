@@ -21,7 +21,7 @@ import Testing
 
     // Top-level keys present.
     #expect(body["model"] as? String == "claude-test-model")
-    #expect(body["max_tokens"] as? Int == 4096)
+    #expect(body["max_tokens"] as? Int == 8192)
     let systemBlocks = try #require(body["system"] as? [[String: Any]])
     #expect(systemBlocks.first?["text"] as? String == "You are a terminal coding agent.")
     #expect(body["messages"] != nil)

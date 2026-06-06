@@ -3,8 +3,20 @@ import Foundation
 /// Default Anthropic model id. Config (T3.7) will override this.
 nonisolated let defaultAnthropicModel = "claude-sonnet-4-5"
 
-/// Default max output tokens for an Anthropic request (decision D2).
-private nonisolated let anthropicMaxTokens = 4096
+/// Default max output tokens for an Anthropic request (decision D2). A 4096-token
+/// ceiling truncates large edits and long answers, so default higher and let the
+/// `ACODE_MAX_TOKENS` environment variable override it.
+private nonisolated let defaultAnthropicMaxTokens = 8192
+
+/// Resolves the output-token ceiling from `ACODE_MAX_TOKENS`, falling back to the
+/// default. Non-positive or unparseable values are ignored.
+private nonisolated func resolvedMaxTokens() -> Int {
+    guard let raw = ProcessInfo.processInfo.environment["ACODE_MAX_TOKENS"],
+          let value = Int(raw.trimmingCharacters(in: .whitespaces)),
+          value > 0
+    else { return defaultAnthropicMaxTokens }
+    return value
+}
 
 /// Errors surfaced by the Anthropic provider.
 enum AnthropicError: Error, CustomStringConvertible {
@@ -152,7 +164,7 @@ struct AnthropicProvider: LLMProvider {
 
         let body: [String: Any] = [
             "model": model ?? defaultAnthropicModel,
-            "max_tokens": anthropicMaxTokens,
+            "max_tokens": resolvedMaxTokens(),
             "stream": true,
             "system": systemValue,
             "messages": messages.map(convert(message:)),

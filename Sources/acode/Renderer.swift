@@ -146,6 +146,7 @@ struct Renderer: Sendable {
     /// the rest of the session via the shared policy.
     nonisolated func approve(_ c: ToolCall) -> Bool {
         if policy.shouldAutoApprove(c.name, command: c.arguments["command"]?.stringValue) { return true }
+        print(Self.approvalDescription(c))
         print("Approve \(c.name)? [y/N/a] ", terminator: "")
         guard let line = readLine() else { return false }
         let answer = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -162,5 +163,35 @@ struct Renderer: Sendable {
 
     nonisolated func spinner(_ label: String) -> Spinner {
         Spinner(label: label)
+    }
+
+    /// A human-readable summary of what a tool call will do, shown above the
+    /// approval prompt so the user can see exactly what they are approving
+    /// rather than just the tool name.
+    nonisolated static func approvalDescription(_ c: ToolCall) -> String {
+        switch c.name {
+        case "run_shell":
+            let command = c.arguments["command"]?.stringValue ?? "(missing command)"
+            return "  run: \(clipDetail(command))"
+        case "edit_file":
+            let path = c.arguments["path"]?.stringValue ?? "(missing path)"
+            let oldStr = c.arguments["old_str"]?.stringValue ?? ""
+            let newStr = c.arguments["new_str"]?.stringValue ?? ""
+            if oldStr.isEmpty {
+                return "  create \(path) (\(newStr.count) bytes)"
+            }
+            return "  edit \(path)\n"
+                + "    - \(clipDetail(oldStr))\n"
+                + "    + \(clipDetail(newStr))"
+        default:
+            return "  \(c.name)"
+        }
+    }
+
+    /// Clips a detail string to a single, length-bounded line for the prompt.
+    private nonisolated static func clipDetail(_ s: String, limit: Int = 200) -> String {
+        let oneLine = s.replacingOccurrences(of: "\n", with: "⏎")
+        guard oneLine.count > limit else { return oneLine }
+        return String(oneLine.prefix(limit)) + "…"
     }
 }

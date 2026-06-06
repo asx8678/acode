@@ -119,6 +119,32 @@ struct Acode: AsyncParsableCommand {
         }
     }
 
+    /// Builds the (planner, coder, reviewer) profile triple from the `--agents`
+    /// list, filling unspecified slots with the standard defaults and applying
+    /// any per-role model overrides from config. An empty list yields the full
+    /// default triple.
+    @MainActor
+    private static func orchestratorProfiles(
+        agents: [String],
+        cfg: Config
+    ) -> (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile) {
+        let base: (AgentProfile, AgentProfile, AgentProfile)
+        if agents.count >= 3 {
+            base = (profile(for: agents[0]), profile(for: agents[1]), profile(for: agents[2]))
+        } else if agents.count == 2 {
+            base = (profile(for: agents[0]), profile(for: agents[1]), .reviewer)
+        } else if agents.count == 1 {
+            base = (profile(for: agents[0]), .coder, .reviewer)
+        } else {
+            base = (.planner, .coder, .reviewer)
+        }
+        return (
+            applyRoleModel(base.0, roleModels: cfg.roleModels),
+            applyRoleModel(base.1, roleModels: cfg.roleModels),
+            applyRoleModel(base.2, roleModels: cfg.roleModels)
+        )
+    }
+
     /// The interactive read-eval-print loop. Slash and shell commands work
     /// without an API key; only model turns require one.
     @MainActor
@@ -171,12 +197,15 @@ struct Acode: AsyncParsableCommand {
                             print("Usage: /plan <task description>")
                         } else {
                             let orchestrator = Orchestrator()
+                            let planProfiles = orchestratorProfiles(agents: agents, cfg: cfg)
                             await runCancellable({
                                 let result = try await orchestrator.run(
                                     task: task,
                                     provider: provider,
                                     tools: tools,
-                                    renderer: renderer
+                                    renderer: renderer,
+                                    profiles: planProfiles,
+                                    providerForProfile: { p in makeProvider(model: p.model ?? resolvedModel, cfg: cfg) }
                                 )
                                 print(result)
                             }, renderer: renderer)
@@ -311,20 +340,7 @@ struct Acode: AsyncParsableCommand {
         renderer.verboseLog("Provider: \(providerName(provider))")
 
         // Map agent names to profiles. Unknown names default to generalist.
-        let profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile)
-        if agents.count >= 3 {
-            profiles = (profile(for: agents[0]), profile(for: agents[1]), profile(for: agents[2]))
-        } else if agents.count == 2 {
-            profiles = (profile(for: agents[0]), profile(for: agents[1]), .reviewer)
-        } else {
-            profiles = (profile(for: agents[0]), .coder, .reviewer)
-        }
-
-        let finalProfiles = (
-            applyRoleModel(profiles.0, roleModels: cfg.roleModels),
-            applyRoleModel(profiles.1, roleModels: cfg.roleModels),
-            applyRoleModel(profiles.2, roleModels: cfg.roleModels)
-        )
+        let finalProfiles = orchestratorProfiles(agents: agents, cfg: cfg)
 
         let orchestrator = Orchestrator()
         return try await orchestrator.run(
@@ -332,7 +348,11 @@ struct Acode: AsyncParsableCommand {
             provider: provider,
             tools: tools,
             renderer: renderer,
-            profiles: finalProfiles
+            profiles: finalProfiles,
+            // Resolve a provider per role so a role's model override can target a
+            // different provider than the top-level default. Roles without an
+            // override fall back to the CLI/config model.
+            providerForProfile: { profile in makeProvider(model: profile.model ?? model, cfg: cfg) }
         )
     }
 

@@ -24,10 +24,15 @@ struct ToolRegistry {
     }
 
     /// The schemas of all tools, or only those whose name is in `allowed`.
+    ///
+    /// Sorted by name so the order is stable across process runs (dictionary
+    /// iteration order is not), keeping the tool block — and therefore the
+    /// provider's prompt-cache prefix — deterministic.
     func schemas(allowed: Set<String>?) -> [ToolSchema] {
         tools.values
             .map { type(of: $0).schema }
             .filter { allowed == nil || allowed?.contains($0.name) == true }
+            .sorted { $0.name < $1.name }
     }
 
     /// Executes a tool call, honoring approval and error semantics.

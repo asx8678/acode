@@ -54,24 +54,35 @@ struct Orchestrator {
     ///   - renderer: For user-facing output.
     ///   - profiles: The three profiles to use (defaults to `.planner`,
     ///     `.coder`, `.reviewer`).
+    ///   - providerForProfile: Optional resolver that returns the provider to
+    ///     use for a given profile. When nil, `provider` is used for every
+    ///     phase. This lets per-role model overrides (`Config.roleModels`) route
+    ///     to the correct provider instead of forcing one provider's API to
+    ///     accept another provider's model id.
     /// - Returns: The final answer string (the last coder output).
     func run(
         task: String,
         provider: any LLMProvider,
         tools: ToolRegistry,
         renderer: Renderer,
-        profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile) = (.planner, .coder, .reviewer)
+        profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile) = (.planner, .coder, .reviewer),
+        providerForProfile: (@MainActor (AgentProfile) -> any LLMProvider)? = nil
     ) async throws -> String {
+        let providerFor: @MainActor (AgentProfile) -> any LLMProvider = providerForProfile ?? { _ in provider }
+
         // MARK: Phase 1 — Planning
 
         try Task.checkCancellation()
         renderer.phase("Planning")
-        let planner = Agent(profile: profiles.planner, provider: provider, tools: tools, renderer: renderer)
+        let planner = Agent(profile: profiles.planner, provider: providerFor(profiles.planner), tools: tools, renderer: renderer)
         let plan = try await planner.run("Plan the following task:\n\n\(task)")
         renderer.endAssistant()
 
         // MARK: Phase 2 — Coder/Review loop
 
+        // One coder Agent for the whole loop so it retains its own history and
+        // does not re-derive the plan from scratch on every round.
+        let coder = Agent(profile: profiles.coder, provider: providerFor(profiles.coder), tools: tools, renderer: renderer)
         var feedback = ""
         var lastCoderOutput = ""
 
@@ -84,19 +95,23 @@ struct Orchestrator {
             if round == 1 {
                 coderInput = "Implement the following plan:\n\n\(plan)"
             } else {
-                coderInput = "Implement the following plan:\n\n\(plan)\n\nReview feedback to address:\n\(feedback)"
+                coderInput = "Address the following review feedback on your implementation:\n\n\(feedback)"
             }
-            let coder = Agent(profile: profiles.coder, provider: provider, tools: tools, renderer: renderer)
             lastCoderOutput = try await coder.run(coderInput)
             renderer.endAssistant()
 
-            // Reviewer
+            // Reviewer — a fresh Agent each round (each review is independent and
+            // re-reads the working tree). Pointed at the actual diff so it does
+            // not have to rediscover the changes blind.
             try Task.checkCancellation()
             renderer.phase("Reviewing (round \(round)/\(maxReviewRounds))")
-            let reviewer = Agent(profile: profiles.reviewer, provider: provider, tools: tools, renderer: renderer)
+            let reviewer = Agent(profile: profiles.reviewer, provider: providerFor(profiles.reviewer), tools: tools, renderer: renderer)
             let reviewOutput = try await reviewer.run(
-                "Review the following implementation against the plan:\n\nPlan:\n\(plan)\n\n"
-                + "Review the code changes made. Output VERDICT: APPROVED or VERDICT: CHANGES on the last line."
+                "Review the implementation against the plan.\n\nPlan:\n\(plan)\n\n"
+                + "The coder reported:\n\(lastCoderOutput)\n\n"
+                + "Inspect the actual changes (e.g. run `git diff`, read the touched files) and check them "
+                + "against the plan for bugs, security issues, and edge cases. "
+                + "Output VERDICT: APPROVED or VERDICT: CHANGES on the last line."
             )
             renderer.endAssistant()
 

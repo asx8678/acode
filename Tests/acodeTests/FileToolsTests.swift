@@ -95,6 +95,26 @@ import Testing
     #expect(written == "created body")
 }
 
+@Test func test_edit_empty_oldstr_refuses_to_clobber_existing() async throws {
+    let name = "acode-editclobber-\(UUID().uuidString).txt"
+    let url = URL(fileURLWithPath: ProjectJail.root).appendingPathComponent(name)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let original = "important contents"
+    try original.write(to: url, atomically: true, encoding: .utf8)
+
+    let tool = EditFileTool()
+    let result = await tool.run(.object([
+        "path": .string(name),
+        "old_str": .string(""),
+        "new_str": .string("replacement")
+    ]))
+
+    #expect(result.isError == true)
+    // The original file must be left untouched.
+    let written = try String(contentsOf: url, encoding: .utf8)
+    #expect(written == original)
+}
+
 @Test func test_edit_unique_replace() async throws {
     let name = "acode-editunique-\(UUID().uuidString).txt"
     let url = URL(fileURLWithPath: ProjectJail.root).appendingPathComponent(name)
