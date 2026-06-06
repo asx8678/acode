@@ -11,6 +11,10 @@ nonisolated final class FakeProvider: LLMProvider, @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [[StreamEvent]]
     private let repeatScript: [StreamEvent]?
+    private var _capturedMessages: [Message] = []
+
+    /// The `messages` passed to the most recent `stream(...)` call.
+    var capturedMessages: [Message] { lock.withLock { _capturedMessages } }
 
     /// Single-script mode (yielded once).
     init(script: [StreamEvent], contextWindow: Int = 200_000) {
@@ -40,6 +44,7 @@ nonisolated final class FakeProvider: LLMProvider, @unchecked Sendable {
         model: String?
     ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
         let next: [StreamEvent] = lock.withLock {
+            _capturedMessages = messages
             if let repeatScript {
                 return repeatScript
             } else if !queue.isEmpty {

@@ -132,6 +132,32 @@ private nonisolated func retryNonRetryable(_ counter: Counter) async throws -> S
 }
 
 @MainActor
+@Test func test_empty_turn_not_persisted() async throws {
+    // A turn that streams neither text nor tool calls must not be stored: an
+    // empty assistant message serializes to an empty content block that both
+    // provider APIs reject, and it would poison every later request.
+    let flag = RanFlag()
+    let provider = FakeProvider(scripts: [
+        [.done(stop: "end_turn", usage: Usage())],                          // empty turn
+        [.textDelta("hello"), .done(stop: "end_turn", usage: Usage())]
+    ])
+    let agent = makeAgent(provider: provider, flag: flag)
+
+    let first = try await agent.run("first")
+    #expect(first == "")
+
+    let second = try await agent.run("second")
+    #expect(second == "hello")
+
+    // The second request must not carry the empty assistant message.
+    let hasEmptyAssistant = provider.capturedMessages.contains {
+        if case .assistant(let text, let calls) = $0 { return text.isEmpty && calls.isEmpty }
+        return false
+    }
+    #expect(!hasEmptyAssistant)
+}
+
+@MainActor
 @Test func test_loop_step_limit() async {
     let flag = RanFlag()
     let call = ToolCall(id: "c1", name: "record", arguments: .object([:]))

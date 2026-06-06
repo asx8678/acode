@@ -141,7 +141,13 @@ final class Agent {
                 }
             }
 
-            conversation.append(.assistant(text: text, toolCalls: toolCalls))
+            // Record the turn, but never persist a wholly empty assistant
+            // message: it serializes to an empty content block, which both
+            // provider APIs reject (400) — and because it stays in history, it
+            // would poison every subsequent request until the session is reset.
+            if !text.isEmpty || !toolCalls.isEmpty {
+                conversation.append(.assistant(text: text, toolCalls: toolCalls))
+            }
             renderer.endAssistant()
             renderer.usage(usage)
 
