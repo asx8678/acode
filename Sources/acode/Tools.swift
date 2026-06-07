@@ -36,7 +36,12 @@ struct ToolRegistry {
     }
 
     /// Executes a tool call, honoring approval and error semantics.
-    func execute(_ call: ToolCall, approve: (ToolCall) -> Bool) async -> ToolResult {
+    ///
+    /// The `approve` closure is `async` (post-P0 of the TUI epic) so the
+    /// TUI/SwiftUI frontends can park a `CheckedContinuation` while the
+    /// user decides. `await` cannot appear inside a `&&` expression, so
+    /// the approval branch is extracted into its own block.
+    func execute(_ call: ToolCall, approve: (ToolCall) async -> Bool) async -> ToolResult {
         guard let tool = tools[call.name] else {
             return ToolResult(
                 callID: call.id,
@@ -44,12 +49,15 @@ struct ToolRegistry {
                 isError: true
             )
         }
-        if tool.requiresApproval && !approve(call) {
-            return ToolResult(
-                callID: call.id,
-                output: "User denied this action.",
-                isError: true
-            )
+        if tool.requiresApproval {
+            let approved = await approve(call)
+            if !approved {
+                return ToolResult(
+                    callID: call.id,
+                    output: "User denied this action.",
+                    isError: true
+                )
+            }
         }
         let result = await tool.run(call.arguments)
         return ToolResult(callID: call.id, output: result.output, isError: result.isError)

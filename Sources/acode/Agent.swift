@@ -91,10 +91,10 @@ final class Agent {
     private var profile: AgentProfile
     private var provider: any LLMProvider
     private let tools: ToolRegistry
-    private let renderer: Renderer
+    private let renderer: any RenderSink
     private var conversation = Conversation()
 
-    init(profile: AgentProfile, provider: any LLMProvider, tools: ToolRegistry, renderer: Renderer) {
+    init(profile: AgentProfile, provider: any LLMProvider, tools: ToolRegistry, renderer: any RenderSink) {
         self.profile = profile
         self.provider = provider
         self.tools = tools

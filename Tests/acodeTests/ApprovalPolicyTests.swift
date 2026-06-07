@@ -30,14 +30,14 @@ import Testing
     #expect(policy.shouldAutoApprove("edit_file") == false)
 }
 
-@Test func test_renderer_approve_uses_policy_without_stdin() {
+@Test func test_renderer_approve_uses_policy_without_stdin() async {
     // Allow-listed tool short-circuits on the policy before any readLine().
     let renderer = Renderer(
         color: false, verbose: false,
         policy: ApprovalPolicy(alwaysAllowed: ["run_shell"])
     )
     let allowed = ToolCall(id: "t", name: "run_shell", arguments: .object([:]))
-    #expect(renderer.approve(allowed) == true)
+    #expect(await renderer.approve(allowed) == true)
 
     // Non-allowed tool with an empty policy denies by default (readLine() nil).
     let denyRenderer = Renderer(
@@ -45,7 +45,7 @@ import Testing
         policy: ApprovalPolicy()
     )
     let denied = ToolCall(id: "t2", name: "edit_file", arguments: .object([:]))
-    #expect(denyRenderer.approve(denied) == false)
+    #expect(await denyRenderer.approve(denied) == false)
 }
 
 // MARK: - Runtime /allow + persistence
@@ -218,13 +218,13 @@ import Testing
     #expect(policy.shouldAutoApprove("edit_file", command: nil) == false)
 }
 
-@Test func test_shell_allowlist_renderer_integration() {
+@Test func test_shell_allowlist_renderer_integration() async {
     let renderer = Renderer(
         color: false, verbose: false,
         policy: ApprovalPolicy(allowedShellPrefixes: ["swift build"])
     )
     let call = ToolCall(id: "t", name: "run_shell", arguments: .object(["command": .string("swift build")]))
-    #expect(renderer.approve(call) == true)
+    #expect(await renderer.approve(call) == true)
 }
 
 @Test func test_config_decodes_shell_allowlist() throws {

@@ -144,6 +144,19 @@ struct RunShellTool: Tool {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        // Critical: do NOT inherit the parent's stdin. When the REPL's
+        // `readLine` is waiting for an approval, a shell child that
+        // inherited stdin would swallow the user's keystroke intended
+        // for the next approval prompt (a real "approve-all keeps
+        // re-prompting" bug). `/dev/null` is EOF — `cat` reads nothing,
+        // `read` returns nothing. Post-P0 fix (swift-92m.1 follow-up);
+        // `ApprovalRepromptTests.runShellChildDoesNotInheritStdin` covers
+        // it. Foundation's `Process` defaults `standardInput` to nil,
+        // which means "inherit the parent's stdin" — so we MUST set it
+        // explicitly to a closed handle to opt out.
+        if let devNull = FileHandle(forReadingAtPath: "/dev/null") {
+            process.standardInput = devNull
+        }
 
         let buffer = OutputBuffer()
         let readHandle = pipe.fileHandleForReading

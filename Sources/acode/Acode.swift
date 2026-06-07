@@ -8,7 +8,7 @@ func runOneShot(
     prompt: String,
     provider: any LLMProvider,
     tools: ToolRegistry,
-    renderer: Renderer,
+    renderer: any RenderSink,
     profile: AgentProfile = .generalist
 ) async throws -> String {
     let agent = Agent(profile: profile, provider: provider, tools: tools, renderer: renderer)
@@ -39,7 +39,7 @@ nonisolated func route(_ s: String) -> Input {
 /// interrupts the current turn and returns to the prompt without killing the
 /// process. Reused by the M5 orchestrator.
 @MainActor
-func runCancellable(_ work: @escaping () async throws -> Void, renderer: Renderer) async {
+func runCancellable(_ work: @escaping () async throws -> Void, renderer: any RenderSink) async {
     let task = Task { try await work() }
 
     // Suppress default termination and route SIGINT to task cancellation.
@@ -198,6 +198,13 @@ struct Acode: AsyncParsableCommand {
                         } else {
                             let orchestrator = Orchestrator()
                             let planProfiles = orchestratorProfiles(agents: agents, cfg: cfg)
+                            // Snapshot the model name so the closure captures a
+                            // `let` (Sendable) rather than the `var resolvedModel`
+                            // that `/model` reassigns — Swift 6.3 strict
+                            // concurrency flags a `var` capture in a sending
+                            // `@MainActor` closure. Semantics preserved: the
+                            // closure is created fresh on each `/plan` call.
+                            let fallbackModel = resolvedModel
                             await runCancellable({
                                 let result = try await orchestrator.run(
                                     task: task,
@@ -205,7 +212,7 @@ struct Acode: AsyncParsableCommand {
                                     tools: tools,
                                     renderer: renderer,
                                     profiles: planProfiles,
-                                    providerForProfile: { p in makeProvider(model: p.model ?? resolvedModel, cfg: cfg) }
+                                    providerForProfile: { p in makeProvider(model: p.model ?? fallbackModel, cfg: cfg) }
                                 )
                                 print(result)
                             }, renderer: renderer)

@@ -48,7 +48,14 @@ nonisolated final class Spinner: @unchecked Sendable {
 }
 
 /// Renders agent output to stdout. Nonisolated and Sendable; no actor.
-struct Renderer: Sendable {
+///
+/// Conforms to `RenderSink` so the engine can be driven through the
+/// seam with `any RenderSink`; this is the post-P0 of the TUI epic
+/// (recovery 2/5). The line-mode `approve` body is unchanged — it just
+/// widens to `async` so the same `Renderer` works for both the REPL
+/// (where `readLine` is sync inside an `async` func) and the future
+/// TUI/SwiftUI frontends (which park a `CheckedContinuation`).
+struct Renderer: Sendable, RenderSink {
     let color: Bool
     var verbose: Bool
     /// Shared session approval state so copies of this struct remember choices.
@@ -143,8 +150,10 @@ struct Renderer: Sendable {
 
     /// Returns true under auto-approve or a remembered allow-always; otherwise
     /// reads a `y/N/a` line (default no). `a`/`all`/`always` allows the tool for
-    /// the rest of the session via the shared policy.
-    nonisolated func approve(_ c: ToolCall) -> Bool {
+    /// the rest of the session via the shared policy. Widened from sync to
+    /// `async` for the post-P0 seam; the body is unchanged — `readLine()`
+    /// is fine inside an `async` function.
+    nonisolated func approve(_ c: ToolCall) async -> Bool {
         if policy.shouldAutoApprove(c.name, command: c.arguments["command"]?.stringValue) { return true }
         print(Self.approvalDescription(c))
         print("Approve \(c.name)? [y/N/a] ", terminator: "")

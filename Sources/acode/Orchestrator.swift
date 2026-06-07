@@ -64,7 +64,7 @@ struct Orchestrator {
         task: String,
         provider: any LLMProvider,
         tools: ToolRegistry,
-        renderer: Renderer,
+        renderer: any RenderSink,
         profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile) = (.planner, .coder, .reviewer),
         providerForProfile: (@MainActor (AgentProfile) -> any LLMProvider)? = nil
     ) async throws -> String {
