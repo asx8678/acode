@@ -92,7 +92,14 @@ final class Terminal {
     func enterRawAltScreen(enableMouse: Bool = true) {
         guard !isRaw else { return }
         var raw = originalTermios
-        raw.c_lflag &= ~(tcflag_t(ICANON) | tcflag_t(ECHO) | tcflag_t(ISIG))
+        // cfmakeraw-equivalent for `c_lflag`: clear ICANON, ECHO, ISIG,
+        // and IEXTEN. The original code only cleared the first three;
+        // leaving IEXTEN set caused `0x04` (Ctrl-D) to be interpreted as
+        // VEOF by the tty line discipline on some macOS PTY configurations
+        // even with ICANON off, swallowing the byte and breaking the
+        // TUI's quit path. Clearing IEXTEN is the documented fix from
+        // `cfmakeraw(3)`.
+        raw.c_lflag &= ~(tcflag_t(ICANON) | tcflag_t(ECHO) | tcflag_t(ISIG) | tcflag_t(IEXTEN))
         if tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0 {
             return  // Can't enter raw; caller sees no effect and can decide.
         }
@@ -109,11 +116,47 @@ final class Terminal {
     /// restores termios. Idempotent.
     func restore() {
         guard isRaw else { return }
-        // Disable everything we may have enabled.
-        write("\u{1B}[?25h\u{1B}[?2004l\u{1B}[?1006l\u{1B}[?1000l\u{1B}[?1049l")
-        flush()
+        // Disable everything we may have enabled. Use a direct `write(2)`
+        // syscall (not the buffered `Terminal.write` + `flush` pair)
+        // because the cleanup path runs from a `defer` at the very end
+        // of the TUI's lifetime — we want the bytes to hit the slave
+        // pty atomically, before the runtime starts tearing the
+        // process down. The buffered path uses Foundation's
+        // `FileHandle.standardOutput.write` which can split the data
+        // across multiple syscalls if the kernel buffer is congested,
+        // and (worse) the Foundation write goes through a higher-level
+        // FILE* layer that may flush stdio buffers — by the time the
+        // `defer` runs the underlying fd may already be in a state
+        // where partial writes succeed but the bytes are discarded
+        // by the tty layer. The direct `write(2)` here is the same
+        // syscall the atexit handler uses (see `acodeRestoreTerminalUnsafe`)
+        // so the two paths produce byte-identical output.
+        let cleanupBytes: [UInt8] = [
+            0x1B, 0x5B, 0x3F, 0x32, 0x35, 0x68,                          // \e[?25h
+            0x1B, 0x5B, 0x3F, 0x32, 0x30, 0x30, 0x34, 0x6C,              // \e[?2004l
+            0x1B, 0x5B, 0x3F, 0x31, 0x30, 0x30, 0x36, 0x6C,              // \e[?1006l
+            0x1B, 0x5B, 0x3F, 0x31, 0x30, 0x30, 0x30, 0x6C,              // \e[?1000l
+            0x1B, 0x5B, 0x3F, 0x31, 0x30, 0x34, 0x39, 0x6C               // \e[?1049l
+        ]
+        cleanupBytes.withUnsafeBufferPointer { buf in
+            if let base = buf.baseAddress {
+                _ = Darwin.write(STDOUT_FILENO, base, buf.count)
+            }
+        }
         var t = originalTermios
-        _ = tcsetattr(STDIN_FILENO, TCSAFLUSH, &t)
+        // Use TCSANOW, NOT TCSAFLUSH. The cleanup sequence above is
+        // already in the kernel's output buffer; it will be transmitted
+        // to the master/terminal as soon as the master reads. TCSANOW
+        // returns immediately (termios change applied at once) without
+        // waiting for the output queue to drain. TCSAFLUSH would block
+        // here until the master drains the output — a real problem in
+        // PTY test harnesses (and any environment) where the reader is
+        // not actively draining the master. The bytes still reach the
+        // terminal; the termios change is decoupled from the output
+        // queue. The async-signal safety handler below still uses
+        // TCSAFLUSH (it's the atexit/sigaction path, where blocking is
+        // acceptable and we want to discard any pending input).
+        _ = tcsetattr(STDIN_FILENO, TCSANOW, &t)
         isRaw = false
     }
 
@@ -252,8 +295,20 @@ private nonisolated func acodeRestoreTerminalUnsafe() {
     // for the pointer dance).
     if acodeSavedTermiosValid {
         var copy = acodeSavedTermios
+        // Use TCSANOW, not TCSAFLUSH. The cleanup escape sequence
+        // above is already in the kernel's tty output queue — the
+        // bytes will reach the master/terminal as soon as the
+        // master reads. TCSANOW applies the termios change
+        // immediately and returns without waiting for the output
+        // queue to drain. TCSAFLUSH would block until the output
+        // drained, which is a real problem at process exit: by
+        // then nobody is draining the master (the test harness is
+        // blocked in `waitpid` polling, not reading). The same
+        // rationale applies to the atexit path *and* the signal
+        // path — in all three the termios change is independent
+        // of the output bytes already in the kernel buffer.
         _ = withUnsafeMutablePointer(to: &copy) { ptr in
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, ptr)
+            tcsetattr(STDIN_FILENO, TCSANOW, ptr)
         }
     }
 }

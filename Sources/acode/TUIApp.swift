@@ -195,6 +195,18 @@ final class TUIApp {
     /// The main loop. Returns when the user quits (Ctrl-D, or Ctrl-C
     /// while idle) or the agent raises an unrecoverable error.
     func run() async {
+        // SAFETY NET (TUI_PLAN §6, swift-k96): anchor `terminal.restore()`
+        // in a `defer` at the top of the function so EVERY exit path
+        // — normal quit (`.quit` effect, Ctrl-D), error throw, task
+        // cancellation, or a future return statement — leaves the
+        // user's terminal in the same state we found it. `restore()`
+        // is idempotent (`guard isRaw else { return }`) so a double-
+        // call (e.g. defer + the explicit `atexit`/`sigaction`
+        // trampolines in `Terminal.swift`) is safe. The trampolines
+        // are the secondary net for `kill -9` and crash; the defer
+        // is the primary net for "the function returned".
+        defer { terminal.restore() }
+
         // Unbounded buffer so a fast producer (network stream) can
         // queue ahead of the model mutation; we drain in order.
         let (stream, continuation) = AsyncStream<Msg>.makeStream(
@@ -235,6 +247,37 @@ final class TUIApp {
         }
         sigwinch.resume()
         self.sigwinchSource = sigwinch
+
+        // 2.5. Enter the alt-screen + raw mode + bracketed-paste + mouse
+        // BEFORE the first paint (swift-k96). Without this call the
+        // TUI renders to the **main screen** with `ESC[2J ESC[H`
+        // clear-and-home instead of entering the **alt-screen buffer**
+        // (`ESC[?1049h`). The previous wiring lost the call during the
+        // TUI-restore-from-baseline; this is the single, correct place
+        // to do it. `enterRawAltScreen` is idempotent (`guard !isRaw`),
+        // so a re-entry into `run()` (future-proofing) is safe.
+        //
+        // What this toggles, byte-for-byte:
+        //   termios: clears ICANON | ECHO | ISIG (raw mode)
+        //   stdout:  ESC[?1049h (alt-screen enter)
+        //            ESC[?25l   (cursor hide)
+        //            ESC[?2004h (bracketed paste enable)
+        //            ESC[?1000h (basic mouse tracking)
+        //            ESC[?1006h (SGR mouse encoding)
+        //
+        // The matching `restore()` (anchored in the `defer` above)
+        // emits the inverse in reverse order, plus restores termios.
+        // See `Terminal.swift` for the exact sequence.
+        //
+        // Why we DON'T double-enable raw mode: this is the ONLY call
+        // site in the codebase that touches termios for raw mode (see
+        // `grep -r ICANON Sources/` — Terminal.swift is the only hit,
+        // inside `enterRawAltScreen` itself). The `ScreenRenderer` also
+        // emits `ESC[?25l` / `ESC[?25h` to flicker-reduce the cursor
+        // during a paint; that's a CSI sequence, NOT a termios toggle,
+        // and composing it with the `enterRawAltScreen` cursor-hide is
+        // safe (both are no-ops when the cursor is already hidden).
+        terminal.enterRawAltScreen()
 
         // 3. Initial paint. Even if the model is empty, get a frame on
         // screen so the user sees a prompt before they type.
@@ -284,6 +327,22 @@ final class TUIApp {
                 if case .quit = effect { shouldExit = true }
                 handleEffect(effect, continuation: continuation)
             }
+            // CRITICAL: check `shouldExit` *immediately* after the
+            // effects loop, not just at the top of the next iteration.
+            // The `for await` only re-evaluates the top-of-loop
+            // `if shouldExit { break }` when a *new* message arrives.
+            // When the user quits (Ctrl-D on empty input, `/quit`,
+            // Ctrl-C while idle), the quit effect is the last thing
+            // we'll ever process — no more messages will come — and
+            // the for-await would otherwise hang forever, leaving the
+            // child's process alive and the alt-screen not torn down.
+            // The `defer` at the top of `run()` only fires when the
+            // function returns, so the hang also blocks the terminal
+            // restore. The `kill -9` from the safety handlers is the
+            // only thing that would eventually unstick the process,
+            // and that would skip the alt-screen leave + termios
+            // restore. Breaking here keeps the cleanup path honest.
+            if shouldExit { break }
 
             // Resize forces a full repaint (the row count or width
             // changed; the diff would be confused).
