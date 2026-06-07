@@ -264,6 +264,11 @@ enum Msg: Sendable {
     /// output back so the reducer can append a `.shell` transcript
     /// item. See H3 in `CommandHandler` for the rationale.
     case shellEnd(command: String, output: String, isError: Bool)
+    /// Updates `Status.branch`. Posted by the slow branch-refresh
+    /// timer in `TUIApp.startBranchRefreshTimer` every 30s, or
+    /// immediately on a fast-path update. The reducer is a
+    /// pure assignment; the next frame picks up the new value.
+    case branchRefresh(String?)
 }
 
 // MARK: - Effect
@@ -408,6 +413,13 @@ func update(_ m: inout TUIModel, _ msg: Msg) -> [Effect] {
         // every shell call (and its output) made during the session.
         m.transcript.append(.shell(command: command, output: output, isError: isError))
         m.activity = .idle
+        return []
+
+    case .branchRefresh(let branch):
+        // Slow timer in `TUIApp` re-detects the active branch and
+        // posts the new value. Pure assignment — the next
+        // `renderFrame` paints the updated HUD / wordmark.
+        m.status.branch = branch
         return []
 
     case .usage(let u):

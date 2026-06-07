@@ -330,14 +330,34 @@ private func renderHUD(
     let cost = renderCost(m.metrics.cost(PricingTable.pricing(for: model)), theme: theme, depth: depth)
     let elapsed = renderElapsed(m.metrics.firstDeltaAt, now: now, theme: theme, depth: depth)
     let pulse = pulse(m.activity != .idle, m.tick)
-    let single = [primary, gaugeStr, tokens, rate, cost, elapsed, pulse]
+    // Branch badge: only added when we actually have a branch
+    // (non-nil `Status.branch`). Nil means "not in a git repo" or
+    // "detached HEAD" — both gracefully degrade by hiding the
+    // badge (per the swift-sp6 spec). `⎇` is the U+2387
+    // "alternative key symbol" — the standard branch glyph in
+    // most CLIs (lazygit, tig, gitui, sourcetree).
+    let branchBadge: String?
+    if let branch = m.status.branch {
+        branchBadge = badge("⎇ \(branch)", theme.accentB, depth: depth)
+    } else {
+        branchBadge = nil
+    }
+    var singleFields: [String] = [primary]
+    if let branchBadge { singleFields.append(branchBadge) }
+    singleFields.append(contentsOf: [gaugeStr, tokens, rate, cost, elapsed, pulse])
+    let single = singleFields
         .joined(separator: " \(sgr(theme.dim, depth))·\(sgrReset()) ")
 
     if displayWidth(stripAnsi(single)) + 1 <= width {
         return [padOrClip(single, to: width, theme: theme, depth: depth)]
     }
-    // Two-row fallback: split at the cost field.
-    let left = [primary, gaugeStr, tokens, rate]
+    // Two-row fallback: split at the cost field. The branch badge
+    // rides on the *primary* (left) row so the user always sees
+    // it on wide terminals and the narrow-terminal fallback.
+    var leftFields: [String] = [primary]
+    if let branchBadge { leftFields.append(branchBadge) }
+    leftFields.append(contentsOf: [gaugeStr, tokens, rate])
+    let left = leftFields
         .joined(separator: " \(sgr(theme.dim, depth))·\(sgrReset()) ")
     let right = [cost, elapsed, pulse]
         .joined(separator: " \(sgr(theme.dim, depth))·\(sgrReset()) ")

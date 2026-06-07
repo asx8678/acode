@@ -376,7 +376,12 @@ struct Acode: AsyncParsableCommand {
         // empty screen on first paint. We use a `var` here so the
         // transcript is mutable.
         let cwd = FileManager.default.currentDirectoryPath
-        let branch: String? = nil  // branch detection is TUI P4 polish
+        // Detect the active branch ONCE at startup so the wordmark and
+        // HUD can show it without shelling out per frame. Detection is
+        // best-effort: `detectGitBranch` returns nil for detached
+        // HEADs and non-repo directories. The loop can refresh this
+        // later via the slow timer (see `branchRefreshTask` below).
+        let branch = detectGitBranch(cwd: cwd)
         var initial = TUIModel(
             status: Status(
                 model: resolvedModel,

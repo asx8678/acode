@@ -61,6 +61,24 @@ final class TUIApp {
     private var sigwinchSource: DispatchSourceSignal?
     private var frameTimerTask: Task<Void, Never>?
     private var turnTask: Task<Void, Never>?
+    /// Slow timer that re-detects the git branch every
+    /// `kBranchRefreshInterval` seconds. Posts a `.branchRefresh`
+    /// Msg with the new value (or `nil` if the repo state changed
+    /// in a way that takes us off a branch). Cancellable on
+    /// `deinit` so we never leak a long-sleeping Task past the
+    /// loop's exit. The 30s cadence is intentionally lax — a
+    /// `git checkout` is rare and the user has visual feedback
+    /// within at most one interval of the switch landing.
+    private var branchRefreshTask: Task<Void, Never>?
+    /// The working directory the branch refresh should probe.
+    /// Captured at init from `Status.cwd` so a `cd` inside the
+    /// session doesn't track (the TUI's project jail pins the
+    /// cwd, so this is fine in practice; the field is a `let`).
+    private let initialCwd: String
+    /// Refresh cadence for the branch readout. 30s is a balance
+    /// between responsiveness to `git checkout` and idle CPU:
+    /// 30s × <1ms = negligible.
+    private static let kBranchRefreshInterval: UInt64 = 30 * 1_000_000_000
     /// Read-loop task handle. Created on `run()` and cancelled in the
     /// `deinit` / cleanup path so we never leak a detached `read()`
     /// past the loop's exit. The blocking `read()` itself can't
@@ -91,6 +109,12 @@ final class TUIApp {
         self.theme = theme
         self.caps = caps
         self.pricing = pricing
+        // Snapshot the cwd at init so the slow branch-refresh timer
+        // can re-probe without re-parsing the model. The TUI's
+        // project jail pins cwd, so a `cd` inside the session
+        // wouldn't be reflected here; that's acceptable — the user
+        // sees a fresh branch on the next TUI launch.
+        self.initialCwd = model.status.cwd
     }
 
     /// The shared approval policy. Set after init from the `Acode`
@@ -135,6 +159,7 @@ final class TUIApp {
         frameTimerTask?.cancel()
         turnTask?.cancel()
         readLoopTask?.cancel()
+        branchRefreshTask?.cancel()
     }
 
     // MARK: - run
@@ -182,6 +207,10 @@ final class TUIApp {
         // Also start the frame timer if we're not idle (we are at
         // startup, but the next event decides; no need to pre-spin).
         updateFrameTimer(continuation: continuation)
+        // Start the slow branch-refresh timer. Re-probes every
+        // 30s; a `git checkout` lands within at most one interval.
+        // Cheap: one stat() per ancestor + a tiny file read on hit.
+        startBranchRefreshTimer(continuation: continuation)
 
         // 4. Main loop. Drain messages; on each one: update → interpret
         // effects → render. The loop exits when an effect carries
@@ -241,6 +270,7 @@ final class TUIApp {
         frameTimerTask?.cancel()
         turnTask?.cancel()
         readLoopTask?.cancel()
+        branchRefreshTask?.cancel()
     }
 
     // MARK: - Effect interpretation
@@ -436,7 +466,6 @@ final class TUIApp {
     }
 
     // MARK: - Frame timer (60 fps while active, 0% CPU at rest)
-
     /// Spins up a 16 ms-tick task iff `activity != .idle` OR a toast
     /// is still fading OR the startup wordmark is still animating.
     /// The task posts `.tick` until cancelled. When the model goes
@@ -476,6 +505,42 @@ final class TUIApp {
         guard let t = model.toast else { return false }
         let ageSeconds = Double(model.tick - t.bornTick) * 0.016
         return ageSeconds < Toast.kToastLifetime
+    }
+
+    // MARK: - Branch refresh (slow timer)
+
+    /// Spins up the slow branch-refresh timer. Re-probes
+    /// `detectGitBranch` every `kBranchRefreshInterval` and posts
+    /// a `.branchRefresh` Msg with the new value. The task is
+    /// cancellable on `deinit` / loop exit, so it never outlives
+    /// the session.
+    ///
+    /// `detectGitBranch` is pure file IO; it does not shell out.
+    /// One stat() per ancestor + a tiny `.git/HEAD` read on hit.
+    /// Cost is well under 1 ms even on a deep tree, and the 30s
+    /// cadence means the steady-state CPU impact is invisible.
+    private func startBranchRefreshTimer(continuation: AsyncStream<Msg>.Continuation) {
+        let cwd = self.initialCwd
+        branchRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: TUIApp.kBranchRefreshInterval)
+                if Task.isCancelled { break }
+                // Probe on a detached task so a slow filesystem
+                // (NFS, network mount) doesn't pin the main actor
+                // for tens of ms. The detect function itself is
+                // sync, so wrapping in a Task is the only way to
+                // get true off-main execution.
+                let branch = await Task.detached(priority: .background) {
+                    detectGitBranch(cwd: cwd)
+                }.value
+                if Task.isCancelled { break }
+                // The continuation is still valid: the loop's
+                // `for await` ends only after we cancel the task
+                // in the cleanup block. Posting here is safe.
+                continuation.yield(.branchRefresh(branch))
+                _ = self
+            }
+        }
     }
 
     // MARK: - Render
