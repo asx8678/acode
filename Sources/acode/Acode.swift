@@ -78,6 +78,18 @@ struct Acode: AsyncParsableCommand {
     /// (and one-shot mode is unchanged). Non-TTY runs (pipes, CI) always
     /// fall through to line mode regardless of this flag.
     @Flag(name: .long) var tui: Bool = false
+    /// swift-be0.4: resume the most recently saved session at
+    /// startup. Mutually exclusive with `--resume`; if both are
+    /// passed, `--resume` wins (it is more specific). The field
+    /// name is `continueLast` because `continue` is a Swift
+    /// keyword; the user-facing flag is `--continue`.
+    @Flag(name: .customLong("continue")) var continueLast: Bool = false
+    /// swift-be0.4: resume a specific session at startup. Accepts
+    /// a UUID, a unique UUID prefix, an exact title, or a unique
+    /// title prefix — same resolution as `/resume <name>` (see
+    /// `resolveSession(idOrPrefix:store:)`). Mutually exclusive
+    /// with `--continue`; if both are passed, `--resume` wins.
+    @Option(name: .customLong("resume")) var resume: String?
 
     /// The acode release version, surfaced in the startup banner.
     nonisolated static let version = "0.1.0"
@@ -97,31 +109,134 @@ struct Acode: AsyncParsableCommand {
         return "Anthropic"
     }
 
+    @MainActor
     mutating func run() async throws {
+        // swift-be0.4: resolve any `--resume` / `--continue` into a
+        // concrete `Session` (or fail fast). `--resume` takes
+        // precedence over `--continue` because it is more specific.
+        // The resolution is non-fatal on miss: we just log and
+        // continue with no session so the user gets the regular
+        // startup path with a "no such session" notice.
+        let startupSession: Session? = try Self.resolveStartupSession(
+            resume: resume,
+            continueLast: continueLast
+        )
+
         // `--tui` (with no `-p` prompt) enters the alternate-screen TUI.
         // The TUI is gated on a real TTY; pipes/CI always fall through to
         // line mode (the TUI's raw-mode would just hang there).
         if tui, prompt == nil {
             let isTTY = isatty(STDIN_FILENO) != 0 && isatty(STDOUT_FILENO) != 0
             if isTTY {
-                await Self.runTUISession(model: model, yes: yes, verbose: verbose, agents: agents)
+                await Self.runTUISession(
+                    model: model,
+                    yes: yes,
+                    verbose: verbose,
+                    agents: agents,
+                    startupSession: startupSession
+                )
                 return
             }
         }
 
         // No prompt: enter the interactive REPL.
         guard let prompt else {
-            await Self.runREPL(model: model, yes: yes, verbose: verbose, agents: agents)
+            await Self.runREPL(
+                model: model,
+                yes: yes,
+                verbose: verbose,
+                agents: agents,
+                startupSession: startupSession
+            )
             return
         }
 
         // One-shot: the provider throws `missingAPIKey` when a key is required,
         // so configuration is left to the provider (local providers need none).
         if !agents.isEmpty {
-            _ = try await Self.executeOrchestrated(prompt: prompt, model: model, yes: yes, verbose: verbose, agents: agents)
+            _ = try await Self.executeOrchestrated(
+                prompt: prompt,
+                model: model,
+                yes: yes,
+                verbose: verbose,
+                agents: agents,
+                startupSession: startupSession
+            )
         } else {
-            _ = try await Self.executeOneShot(prompt: prompt, model: model, yes: yes, verbose: verbose)
+            _ = try await Self.executeOneShot(
+                prompt: prompt,
+                model: model,
+                yes: yes,
+                verbose: verbose,
+                startupSession: startupSession
+            )
         }
+    }
+
+    /// Resolves the startup session from `--resume` / `--continue`.
+    /// Returns `nil` if neither is set, if the requested session is
+    /// not found, or if the requested session is ambiguous. In all
+    /// non-error cases the caller continues with no session (and
+    /// either a notice for `--resume` miss, or a silent fallback
+    /// for `--continue` miss so the command can be a no-op).
+    ///
+    /// Errors that crash early are limited to the
+    /// genuinely-broken-args cases (empty `--resume ""`); those
+    /// are user mistakes we want to surface, not silently ignore.
+    ///
+    /// MainActor-isolated because `SessionStore` is itself
+    /// MainActor-isolated (file I/O lives on the main actor in
+    /// the Wave A design).
+    @MainActor
+    private static func resolveStartupSession(
+        resume: String?,
+        continueLast: Bool
+    ) throws -> Session? {
+        // Precedence: --resume > --continue. If both are given,
+        // --resume wins (it is more specific).
+        if let resumeArg = resume?.trimmingCharacters(in: .whitespaces), !resumeArg.isEmpty {
+            switch resolveSession(idOrPrefix: resumeArg, store: SessionStore.default) {
+            case .found(let s):
+                let shortID = String(s.id.prefix(8))
+                FileHandle.standardError.write(Data(
+                    "Resumed \(shortID): \(s.title ?? "(untitled)") — \(s.conversation.messages.count) messages.\n".utf8
+                ))
+                return s
+            case .notFound:
+                // Soft-fail: print a notice and continue with no
+                // session. We don't `throw` because a missing
+                // session shouldn't kill the process — the user
+                // can still run a one-shot or interactive turn
+                // from scratch.
+                FileHandle.standardError.write(Data(
+                    "warning: no session matched \"\(resumeArg)\". Try --resume with a different prefix.\n".utf8
+                ))
+                return nil
+            case .ambiguous(let matches):
+                let heads = matches.prefix(3).map { String($0.id.prefix(8)) }
+                let more = matches.count > 3 ? " (and \(matches.count - 3) more)" : ""
+                FileHandle.standardError.write(Data(
+                    "warning: \"\(resumeArg)\" matched \(matches.count) sessions: \(heads.joined(separator: ", "))\(more). Use a longer prefix.\n".utf8
+                ))
+                return nil
+            }
+        }
+        if continueLast {
+            if let recent = SessionStore.default.mostRecent() {
+                let shortID = String(recent.id.prefix(8))
+                FileHandle.standardError.write(Data(
+                    "Resumed \(shortID): \(recent.title ?? "(untitled)") — \(recent.conversation.messages.count) messages.\n".utf8
+                ))
+                return recent
+            } else {
+                // --continue with no saved sessions is a soft no-op.
+                FileHandle.standardError.write(Data(
+                    "warning: --continue: no saved sessions; starting fresh.\n".utf8
+                ))
+                return nil
+            }
+        }
+        return nil
     }
 
     /// Maps an agent name string to a profile.
@@ -168,7 +283,8 @@ struct Acode: AsyncParsableCommand {
         model: String?,
         yes: Bool,
         verbose: Bool,
-        agents: [String]
+        agents: [String],
+        startupSession: Session? = nil
     ) async {
         print("acode \(version)")
 
@@ -197,7 +313,21 @@ struct Acode: AsyncParsableCommand {
         // backend (`~/.config/acode/sessions` by default; can be
         // overridden via the testable init).
         let sessionStore = SessionStore.default
-        var currentSession: Session? = nil
+        var currentSession: Session? = startupSession
+        // swift-be0.4: seed the agent with the loaded history.
+        // This has to happen BEFORE the first readLine (otherwise
+        // the first user turn would think it's a fresh
+        // conversation).
+        if let session = startupSession {
+            agent.restore(session.conversation)
+            if let savedModel = session.model, !savedModel.isEmpty, savedModel != resolvedModel {
+                let newProvider = makeProvider(model: savedModel, cfg: cfg)
+                agent.switchProvider(newProvider)
+                resolvedModel = savedModel
+            }
+            let shortID = String(session.id.prefix(8))
+            print("Resumed \(shortID): \(session.title ?? "(untitled)") — \(session.conversation.messages.count) messages.")
+        }
 
         loop: while true {
             print("> ", terminator: "")
@@ -504,7 +634,8 @@ struct Acode: AsyncParsableCommand {
         model: String?,
         yes: Bool,
         verbose: Bool,
-        agents: [String]
+        agents: [String],
+        startupSession: Session? = nil
     ) async {
         let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
@@ -547,10 +678,41 @@ struct Acode: AsyncParsableCommand {
         // closure captures it for a sending `@MainActor` (Swift 6.3 strict
         // concurrency: capturing a `var` in a sending closure is rejected).
         let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: sink)
+        // swift-be0.4: when `--resume`/`--continue` lands a
+        // session before the loop starts, seed the agent with
+        // the loaded history. The agent's `restore(_:)` is the
+        // write side of the seam added in swift-be0.3 step 0.
+        // The visible TUI transcript is also seeded from the
+        // conversation further down (initial model
+        // construction), since `tuiApp.replaceTranscript` posts
+        // a Msg that wouldn't land until the loop is up.
+        if let session = startupSession {
+            agent.restore(session.conversation)
+        }
+        // The model id shown in the HUD/wordmark has to match
+        // the session's saved model, not the CLI's `--model`
+        // flag — `--resume`/`--continue` are "use what the
+        // session used". We re-derive the `let resolvedModel`
+        // above into `startupResolvedModel` and switch the
+        // agent's provider so a `/model` after a resume reports
+        // the session's model.
+        let startupResolvedModel: String
+        if let savedModel = startupSession?.model, !savedModel.isEmpty {
+            startupResolvedModel = savedModel
+        } else {
+            startupResolvedModel = resolvedModel
+        }
+        if let session = startupSession,
+           let savedModel = session.model,
+           !savedModel.isEmpty,
+           savedModel != startupResolvedModel {
+            let newProvider = makeProvider(model: savedModel, cfg: cfg)
+            agent.switchProvider(newProvider)
+        }
 
         // Pricing is read once at startup so the HUD's cost widget doesn't
         // pay the table-lookup cost on every frame.
-        let pricing = PricingTable.pricing(for: resolvedModel)
+        let pricing = PricingTable.pricing(for: startupResolvedModel)
 
         // Detect terminal capabilities from env. Capabilities.detect is a
         // pure function of the environment — it does NOT query the live
@@ -570,16 +732,50 @@ struct Acode: AsyncParsableCommand {
         // HEADs and non-repo directories. The loop can refresh this
         // later via the slow timer (see `branchRefreshTask` below).
         let branch = detectGitBranch(cwd: cwd)
+        // `provider.contextWindow` is owned by the provider that
+        // the agent will actually use (which may have been
+        // switched above when a startup session re-aligned the
+        // model). We query the agent's current provider here so
+        // the HUD's context bar reflects the live limit, not the
+        // CLI-flag model.
+        let agentProviderContextWindow: Int = {
+            // The agent holds a non-public `provider`; the only
+            // public surface is `contextWindow` on the provider
+            // we just built. We re-resolve via the same factory
+            // path we used for the switch so the limit is the
+            // one the agent is using, not a stale read.
+            return (startupSession?.model.flatMap { savedModel in
+                let p = makeProvider(model: savedModel, cfg: cfg)
+                return p.contextWindow
+            }) ?? provider.contextWindow
+        }()
         var initial = TUIModel(
             status: Status(
-                model: resolvedModel,
+                model: startupResolvedModel,
                 cwd: cwd,
                 branch: branch,
-                contextWindow: provider.contextWindow
+                contextWindow: agentProviderContextWindow
             ),
             startup: true
         )
-        initial.transcript.append(.notice("acode \(version) — type /help for commands. Ctrl-C cancels a turn; Ctrl-D quits."))
+        // Seed the visible transcript with the loaded history
+        // when `--resume`/`--continue` lands a session before
+        // the loop starts. The same `transcriptItems(from:)`
+        // mapper used by the in-loop `/resume` path keeps the
+        // two surfaces in parity. A small "Resumed" notice is
+        // prepended so the user knows the visible history
+        // came from a save, not the current session.
+        if let session = startupSession {
+            let items = transcriptItems(from: session.conversation)
+            initial.transcript.append(.notice(
+                "Resumed session \(String(session.id.prefix(8))): \(session.title ?? "(untitled)") — \(session.conversation.messages.count) messages."
+            ))
+            initial.transcript.append(contentsOf: items)
+            // Dismiss the startup wordmark; the user is mid-session.
+            initial.startup = false
+        } else {
+            initial.transcript.append(.notice("acode \(version) — type /help for commands. Ctrl-C cancels a turn; Ctrl-D quits."))
+        }
 
         // Construct the loop's main object. The init builds no I/O; the
         // `run()` method wires the AsyncStream, the SIGWINCH source, and
@@ -598,11 +794,13 @@ struct Acode: AsyncParsableCommand {
         // `tools`, `sink`, and `policy`. The TUI app is set as the
         // command handler's weak target for `/theme`.
         //
-        // swift-be0.3: thread the session store so `/save`,
-        // `/resume`, `/sessions`, and auto-save on `/quit` all
-        // work in the TUI. `currentSession` defaults to nil; it
-        // is set by an in-loop `/resume` (see
-        // `CommandHandler.handleResume`).
+        // swift-be0.3 + swift-be0.4: thread the session store
+        // (and the optional pre-loaded session) so `/save`,
+        // `/resume`, `/sessions`, auto-save on `/quit`, and
+        // the `--resume`/`--continue` boot path all work in
+        // the TUI. `currentSession` is set by `Acode.run()`
+        // when `--resume`/`--continue` lands a session before
+        // the loop starts; nil for a fresh launch.
         let commandHandler = CommandHandler(
             agent: agent,
             resolvedModel: resolvedModel,
@@ -612,7 +810,8 @@ struct Acode: AsyncParsableCommand {
             profiles: orchestratorProfiles(agents: agents, cfg: cfg),
             policy: policy,
             app: tuiApp,
-            sessionStore: SessionStore.default
+            sessionStore: SessionStore.default,
+            currentSession: startupSession
         )
         tuiApp.setCommandHandler(commandHandler)
         tuiApp.setApprovalPolicy(policy)
@@ -627,7 +826,8 @@ struct Acode: AsyncParsableCommand {
         prompt: String,
         model: String?,
         yes: Bool,
-        verbose: Bool
+        verbose: Bool,
+        startupSession: Session? = nil
     ) async throws -> String {
         let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
@@ -646,7 +846,39 @@ struct Acode: AsyncParsableCommand {
         let renderer = Renderer(color: color, verbose: verbose, policy: policy)
         renderer.verboseLog("Model: \(resolvedModel)")
         renderer.verboseLog("Provider: \(providerName(provider))")
-        return try await runOneShot(prompt: prompt, provider: provider, tools: tools, renderer: renderer)
+        // swift-be0.4: one-shot + --resume/--continue. We can't
+        // re-use `runOneShot` (which builds a fresh `Agent` with
+        // no history), so we build the agent here, restore the
+        // history, run, and (if a session was loaded) persist
+        // the updated history back so the continuation is
+        // durable.
+        let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: renderer)
+        var effectiveResolvedModel = resolvedModel
+        if let session = startupSession {
+            agent.restore(session.conversation)
+            if let savedModel = session.model, !savedModel.isEmpty, savedModel != effectiveResolvedModel {
+                let newProvider = makeProvider(model: savedModel, cfg: cfg)
+                agent.switchProvider(newProvider)
+                effectiveResolvedModel = savedModel
+                renderer.verboseLog("Provider: \(providerName(newProvider))")
+            }
+        }
+        let result = try await agent.run(prompt)
+        // Persist the updated conversation back to the same
+        // session. For an empty-history `--continue` with no
+        // pre-existing sessions, there's nothing to update;
+        // for a `--resume <id>`, we update in place. This is
+        // the "one-shot continuation" guarantee from
+        // swift-be0.4.
+        if var session = startupSession {
+            session.conversation = agent.history
+            session.updatedAt = Date()
+            // If the model id changed mid-run (the model could
+            // theoretically switch via tools in the future),
+            // update it. For now this is a no-op.
+            SessionStore.default.save(session)
+        }
+        return result
     }
 
     /// Builds the runtime and runs one prompt through the multi-agent
@@ -657,7 +889,8 @@ struct Acode: AsyncParsableCommand {
         model: String?,
         yes: Bool,
         verbose: Bool,
-        agents: [String]
+        agents: [String],
+        startupSession: Session? = nil
     ) async throws -> String {
         let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
