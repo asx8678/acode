@@ -115,8 +115,14 @@ final class TUIApp {
     /// Switches the active theme. Called by `CommandHandler` when the
     /// user runs `/theme <name>`. The next `renderFrame` (next frame,
     /// ~16 ms away) picks up the new palette.
+    ///
+    /// Perf: also busts the diff+highlight memo (the cache key
+    /// already includes the theme ID, but a hard clear is
+    /// defense-in-depth in case a future change drops the theme
+    /// from the key — see `DiffCache.clear`).
     func setTheme(_ t: Theme) {
         self.theme = t
+        diffCacheClear()
     }
 
     /// The currently-active theme. Exposed for the loop to print

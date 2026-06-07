@@ -824,8 +824,18 @@ private func approvalCardRows(
         let new = call.arguments["new_str"]?.stringValue ?? ""
         let path = call.arguments["path"]?.stringValue ?? ""
         let lang = detectLang(path: path)
-        let hunks = buildHunks(old: old, new: new)
-        body = diffView(hunks, theme: theme, depth: depth, lang: lang).count
+        // Perf: consult the (old, new, lang, theme, depth) memo
+        // instead of recomputing LCS + per-line highlight for the
+        // hit-test row count. The same cache is shared with
+        // `renderApprovalCard` so the row count and the rendered
+        // body can't drift.
+        body = memoizedDiffRowCount(
+            old: old,
+            new: new,
+            lang: lang,
+            theme: theme,
+            depth: depth
+        )
     case "run_shell":
         body = 1
     default:
@@ -874,8 +884,15 @@ private func renderApprovalCard(
         let new = call.arguments["new_str"]?.stringValue ?? ""
         let path = call.arguments["path"]?.stringValue ?? ""
         let lang = detectLang(path: path)
-        let hunks = buildHunks(old: old, new: new)
-        let diff = diffView(hunks, theme: theme, depth: depth, lang: lang)
+        // Perf: use the memoized diff (shared with `approvalCardRows`
+        // so the row count and the body are guaranteed identical).
+        let diff = memoizedDiffView(
+            old: old,
+            new: new,
+            lang: lang,
+            theme: theme,
+            depth: depth
+        )
         for d in diff {
             lines.append(padOrClip("  " + d, to: cols, theme: theme, depth: depth))
         }

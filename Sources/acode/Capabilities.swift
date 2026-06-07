@@ -5,7 +5,7 @@ import Foundation
 /// Color depth the active terminal supports. The Theme layer gates every
 /// escape sequence on this so a 16-color terminal never receives a raw
 /// `\\e[38;2;r;g;bm`. Detection in `Capabilities.detect`.
-enum ColorDepth: Sendable, Equatable {
+enum ColorDepth: Sendable, Equatable, Hashable {
     case mono         // no color at all
     case x16          // the ANSI 16-color palette
     case x256         // 256-color palette (xterm)

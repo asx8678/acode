@@ -99,6 +99,135 @@ func diffView(_ hunks: [Hunk], theme: Theme, depth: ColorDepth, lang: Lang = .pl
     return out
 }
 
+// MARK: - Memoized diff cache (perf, swift-7p2)
+//
+// `renderFrame` runs in `frameTimerTask` at ~60Hz while a tool
+// approval is on screen. The approval card renders `buildHunks`
+// (LCS — O(n·m) on edit_file payloads) and a per-line `highlight`
+// for every diff line, EVERY frame, even when the card is static.
+// That was the dominant CPU hotspot on a long diff with a
+// mid-approval pause.
+//
+// The cache is keyed on `(old, new, lang, themeID, depth)`. Theme
+// and depth are in the key so a `/theme` switch naturally
+// invalidates by producing a fresh key (old theme's entries become
+// unreachable and are evicted on overflow). Width is *not* in the
+// key: `diffView` does not wrap — callers wrap the output with the
+// current terminal width after the cache lookup. A resize never
+// needs to bust the diff cache.
+//
+// Process-global `static let` is intentional: the cache is
+// process-wide so a `/theme` switch from a previous session (no,
+// the process is fresh each launch, but) or a long-running TUI
+// benefits from sharing across all approval cards rendered in
+// the session. The `nonisolated final class` + `NSLock` pattern
+// mirrors `ScreenRenderer`'s off-main shared-state carve-out.
+
+/// Composite key for the diff+highlight memo. `old`/`new` are
+/// the raw `old_str`/`new_str` arguments from an `edit_file`
+/// call; identical content hashes to the same key.
+struct DiffCacheKey: Hashable, Sendable {
+    let old: String
+    let new: String
+    let lang: Lang
+    let themeID: String
+    let depth: ColorDepth
+}
+
+/// Bounded process-global cache. LRU is overkill for a TUI; a hard
+/// cap with a full clear on overflow keeps the dict small without
+/// tracking recency. 64 entries covers a realistic session: the
+/// default cap is roughly 3x the largest transcript any user will
+/// have on screen at once.
+///
+/// MainActor-isolated (the package's `.defaultIsolation(MainActor.self)`
+/// makes this the default) and only ever called from `diffView`,
+/// which is itself a main-actor function. No lock, no `Sendable`
+/// escape hatch needed: the dict is single-threaded by construction.
+@MainActor
+private final class DiffCache {
+    private var entries: [DiffCacheKey: [String]] = [:]
+    private let cap: Int
+
+    init(cap: Int = 64) {
+        self.entries = [:]
+        self.cap = cap
+    }
+
+    func get(_ key: DiffCacheKey) -> [String]? {
+        entries[key]
+    }
+
+    func put(_ key: DiffCacheKey, _ value: [String]) {
+        if entries.count >= cap {
+            // Full clear on overflow — same effective behavior as
+            // a soft LRU, but allocation-free. The next miss will
+            // re-populate from the (small) current set of edits.
+            entries.removeAll(keepingCapacity: true)
+        }
+        entries[key] = value
+    }
+
+    /// Hard reset. Wired to the theme-change path in
+    /// `TUIApp.setTheme` for defense-in-depth — the themeID in the
+    /// key already isolates, so this is belt-and-suspenders against
+    /// a future change that drops the themeID from the key.
+    func clear() {
+        entries.removeAll(keepingCapacity: true)
+    }
+}
+
+@MainActor
+private let diffCache = DiffCache()
+
+/// Memoized `buildHunks` + `diffView` for the approval-card path.
+/// Use this in renderFrame so the per-frame diff+highlight work
+/// is amortized to once per (old, new, lang, theme, depth) tuple.
+/// `lang` defaults to `.plain`; the approval card passes the
+/// extension-detected value from `Highlight.detectLang`.
+func memoizedDiffView(
+    old: String,
+    new: String,
+    lang: Lang = .plain,
+    theme: Theme,
+    depth: ColorDepth
+) -> [String] {
+    let key = DiffCacheKey(
+        old: old,
+        new: new,
+        lang: lang,
+        themeID: theme.name,
+        depth: depth
+    )
+    if let cached = diffCache.get(key) {
+        return cached
+    }
+    let hunks = buildHunks(old: old, new: new)
+    let lines = diffView(hunks, theme: theme, depth: depth, lang: lang)
+    diffCache.put(key, lines)
+    return lines
+}
+
+/// Convenience for the count-only path. Same cache; the caller
+/// only needs the row count to drive hit-test math in
+/// `approvalCardRows`. Avoids a second traversal of the result
+/// when all the caller wants is `.count`.
+func memoizedDiffRowCount(
+    old: String,
+    new: String,
+    lang: Lang = .plain,
+    theme: Theme,
+    depth: ColorDepth
+) -> Int {
+    memoizedDiffView(old: old, new: new, lang: lang, theme: theme, depth: depth).count
+}
+
+/// Wired to `TUIApp.setTheme` for defense-in-depth cache busting.
+/// See `DiffCache.clear` for the rationale.
+func diffCacheClear() {
+    diffCache.clear()
+}
+
 private func renderHunkHeader(_ hunk: Hunk, theme: Theme, depth: ColorDepth) -> String {
     let dim = sgr(theme.dim, depth)
     let reset = sgrReset()
