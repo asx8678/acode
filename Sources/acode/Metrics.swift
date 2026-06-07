@@ -7,15 +7,48 @@ import Foundation
 /// the timestamp the loop captures (no `Date.now` inside the struct, per
 /// the TUI_PLAN §6 verification story).
 struct Metrics: Sendable, Equatable {
-    /// Cumulative input tokens for the current turn.
+    /// Session-cumulative input tokens. Used by the cost calculator
+    /// (you pay per token across the whole session) and the
+    /// `↑<in>` HUD readout. Does NOT drive the context gauge —
+    /// see `contextTokens` for that. Reset behavior is the
+    /// reducer's choice; currently session-cumulative.
     var inTokens: Int = 0
-    /// Cumulative output tokens for the current turn.
+    /// Session-cumulative output tokens. Used by the cost
+    /// calculator and the `↓<out>` HUD readout. The
+    /// per-turn-equivalent for the tok/s rate is `turnOutTokens`.
+    /// Reset behavior is the reducer's choice; currently
+    /// session-cumulative.
     var outTokens: Int = 0
+    /// Per-turn output tokens, reset to 0 at every `.submitTask`
+    /// effect by the loop. Drives `tokPerSec` (which is
+    /// per-turn, not session-wide) so the rate stays meaningful
+    /// across a multi-turn session. `outTokens` stays
+    /// session-cumulative for the cost path — `tokPerSec` and
+    /// `cost` have different windows on purpose.
+    var turnOutTokens: Int = 0
+    /// Latest snapshot of the prompt size, in tokens, reported by
+    /// the most recent `.usage` event. The reducer REPLACES
+    /// this each event (does NOT add) because each `Usage.input`
+    /// the provider reports is the full (re-sent) prompt size
+    /// for that step — adding them would over-count by N× for an
+    /// N-step turn and peg the HUD's context gauge at the
+    /// end of a single response (the bug from `swift-gz9`).
+    /// Within a multi-step turn, `u.input` grows step-over-step
+    /// as the conversation grows, so the latest value is also
+    /// the most accurate view of "how much context am I using
+    /// right now." Drove the previous gauge argument
+    /// `inTokens + outTokens`, which was session-cumulative and
+    /// had no relationship to current context occupancy.
+    var contextTokens: Int = 0
     /// Cached input hits. Reserved for future use — the current `Usage`
     /// struct doesn't carry cache info, so this stays 0 in P2.
     var cacheHits: Int = 0
-    /// Wall-clock stamp of the first delta of the current turn. The loop
-    /// sets this on turn start; the reducer itself never touches it.
+    /// Wall-clock stamp of the first delta of the **current turn**.
+    /// The loop sets this at every `.submitTask` effect (not gated
+    /// on nil — see `swift-gz9` follow-up: the previous `nil` check
+    /// meant it was set only on the first turn ever, which made
+    /// `tokPerSec` wildly inflated after turn 1). The reducer
+    /// never touches it.
     var firstDeltaAt: Double?
     /// Rolling ring buffer of recent tok/s samples (drives the sparkline).
     /// Capacity is the latest N samples; older samples are dropped.
@@ -24,13 +57,15 @@ struct Metrics: Sendable, Equatable {
     /// at 4 Hz, which renders cleanly at the HUD's 16-cell width.
     static let sampleCapacity = 32
 
-    /// tok/s since `firstDeltaAt`. Returns 0 if no deltas yet.
+    /// tok/s since `firstDeltaAt`, using the per-turn `turnOutTokens`
+    /// (NOT the session-cumulative `outTokens` — using that would
+    /// make the rate blow up after turn 1). Returns 0 if no deltas yet.
     func tokPerSec(now: Double) -> Int {
         guard let start = firstDeltaAt,
               now > start,
-              outTokens > 0 else { return 0 }
+              turnOutTokens > 0 else { return 0 }
         let elapsed = now - start
-        return Int(Double(outTokens) / elapsed)
+        return Int(Double(turnOutTokens) / elapsed)
     }
 
     /// Total cost in dollars. Returns `nil` if no pricing info is known

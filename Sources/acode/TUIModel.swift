@@ -497,12 +497,29 @@ func update(_ m: inout TUIModel, _ msg: Msg) -> [Effect] {
         return []
 
     case .usage(let u):
+        // Cost path: cumulative. The HUD's `↑<in> ↓<out> $` readouts
+        // and the `Metrics.cost` calculation both want session
+        // totals — you pay for every token across the whole session,
+        // not just the current turn.
         m.metrics.inTokens += u.input
         m.metrics.outTokens += u.output
+        // Per-turn path: drives the tok/s rate. The loop resets
+        // `turnOutTokens` to 0 at every `.submitTask` effect, so
+        // this counter measures the CURRENT turn's output, not the
+        // session's. Used by `tokPerSec` only.
+        m.metrics.turnOutTokens += u.output
+        // Context gauge snapshot: REPLACE, do NOT add. `u.input` is
+        // the full (re-sent) prompt size for this step, so adding
+        // across steps would over-count by N× for an N-step turn
+        // and peg the gauge in a single response (the `swift-gz9`
+        // bug). The latest event's input is the best live
+        // approximation of "how much context am I using right now."
+        m.metrics.contextTokens = u.input + u.output
         // First-delta timestamp: the loop sets `firstDeltaAt` on turn
-        // start, but if the first event we see is a usage chunk (no
-        // deltas yet), fall back to "the first sample" so tokPerSec
-        // is still meaningful.
+        // start (at every `.submitTask` effect, not gated on nil —
+        // see `swift-gz9`), but if the first event we see is a usage
+        // chunk (no deltas yet), fall back to "the first sample" so
+        // tokPerSec is still meaningful.
         if m.metrics.firstDeltaAt == nil, m.tick > 0 {
             m.metrics.firstDeltaAt = Double(m.tick)
         }

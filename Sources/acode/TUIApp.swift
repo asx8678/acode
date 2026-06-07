@@ -315,12 +315,23 @@ final class TUIApp {
             // CFAbsoluteTime directly; the loop stamps `firstDeltaAt`
             // right before posting the turn task. We detect "is this
             // the start of a turn" by checking that a `.submitTask`
-            // effect is in flight and `firstDeltaAt` is nil.
+            // effect is in flight.
+            //
+            // swift-gz9 follow-up: the previous code was gated on
+            // `firstDeltaAt == nil`, so the timestamp was set only
+            // on the FIRST turn ever. After turn 1, `tokPerSec` ran
+            // over (session-cumulative outTokens) / (full session
+            // elapsed) and was wildly inflated. The fix resets
+            // BOTH `firstDeltaAt` and `turnOutTokens` at every turn
+            // start, not just the first. The reducer never sees
+            // this — it's a loop-side carve-out alongside the tool
+            // start/end wall-clock stamps below.
             let isTurnStart = effects.contains(where: {
                 if case .submitTask = $0 { return true } else { return false }
             })
-            if isTurnStart, model.metrics.firstDeltaAt == nil {
+            if isTurnStart {
                 model.metrics.firstDeltaAt = CFAbsoluteTimeGetCurrent()
+                model.metrics.turnOutTokens = 0
             }
 
             for effect in effects {

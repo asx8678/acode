@@ -316,8 +316,17 @@ private func renderHUD(
 ) -> [String] {
     let model = m.status.model
     let primary = badge("◆ \(shortenModel(model))", theme.accentA, depth: depth)
+    // swift-gz9: the gauge now reads the latest `.usage` snapshot
+    // (`m.metrics.contextTokens`) instead of the session-cumulative
+    // `inTokens + outTokens`. The cumulative sum had no relationship
+    // to current context occupancy — `Agent.run` emits one usage
+    // event per step, and each step's `u.input` is the full
+    // (re-sent) prompt size — so adding across steps over-counted
+    // by N× and pegged the gauge within a single response. The
+    // replace-snapshot in the reducer converges to the true final
+    // context size as the turn's last step lands.
     let gaugeStr = gauge(
-        used: m.metrics.inTokens + m.metrics.outTokens,
+        used: m.metrics.contextTokens,
         total: max(m.status.contextWindow, 1),
         width: 10,
         theme: theme,
