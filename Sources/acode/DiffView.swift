@@ -192,6 +192,11 @@ func memoizedDiffView(
     theme: Theme,
     depth: ColorDepth
 ) -> [String] {
+    // NOTE: `themeID: theme.name` would collide if two custom
+    // themes with the same name ever coexisted. Safe today because
+    // `/theme` resolves preset themes exclusively — no code path
+    // constructs a custom `Theme` value — so name uniqueness is
+    // guaranteed for the lifetime of this cache.
     let key = DiffCacheKey(
         old: old,
         new: new,

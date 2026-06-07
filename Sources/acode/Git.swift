@@ -96,10 +96,14 @@ private nonisolated func parseRefLine(_ line: String) -> String? {
     let prefix = "ref: refs/heads/"
     if trimmed.hasPrefix(prefix) {
         let name = String(trimmed.dropFirst(prefix.count))
-        // Refuse names with path separators or `..` — a `.git/HEAD`
-        // for a weird ref shouldn't escape into the HUD as a path
-        // traversal payload (defense in depth, not a real threat).
-        if name.isEmpty || name.contains("/") || name.contains("..") {
+        // Refuse empty names and `..` sequences. We INTENTIONALLY
+        // allow `/` in the name — the standard branch convention
+        // uses slash-prefixed names (`feature/foo`, `release/1.2`,
+        // `bugfix/bar`), and the branch is only ever rendered as a
+        // HUD display string (`⎇ <branch>`), never used as a
+        // filesystem path, so `/` is safe. The `..` guard is
+        // belt-and-suspenders against a crafted `.git/HEAD`.
+        if name.isEmpty || name.contains("..") {
             return nil
         }
         return name

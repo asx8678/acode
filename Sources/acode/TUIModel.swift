@@ -600,12 +600,14 @@ private func updateKey(_ m: inout TUIModel, _ key: KeyEvent) -> [Effect] {
         // the LLM as a chat message, which is both slower and
         // brain-fidelity-wrong (the model would narrate the command
         // instead of executing it).
-        if let bang = text.firstIndex(of: "!") {
-            // Only honor a single leading `!`; embedded `!` in a
-            // message is just text. Trim trailing whitespace from
-            // the command; the executor's first arg is the entire
-            // tail.
-            let cmd = text[text.index(after: bang)...]
+        if text.hasPrefix("!") {
+            // Only honor a single LEADING `!`; embedded `!` in a
+            // message is just text (e.g. `explain !important tags`
+            // must NOT shell-execute). Mirrors line-mode
+            // (`Acode.swift` uses `trimmed.hasPrefix("!")`).
+            // Trim trailing whitespace from the command; the
+            // executor's first arg is the entire tail.
+            let cmd = text.dropFirst()
                 .trimmingCharacters(in: .whitespaces)
             if cmd.isEmpty {
                 // `!` alone with no command is a usage error —

@@ -375,7 +375,7 @@ final class TUIApp {
             // off-main + cancellable (it owns the process box and
             // pipes), so this is safe to await from the loop task.
             turnTask?.cancel()
-            turnTask = Task { [weak self, continuation] in
+            turnTask = Task { [continuation] in
                 let result = await RunShellTool.execute(command: command, timeout: 60)
                 // Cancellation lands as `output: "Cancelled."` with
                 // `isError: true` from the executor; we treat any
@@ -390,7 +390,6 @@ final class TUIApp {
                     output: result.output,
                     isError: result.isError
                 ))
-                _ = self
             }
 
         case .showToast(let text):
@@ -521,6 +520,9 @@ final class TUIApp {
     /// cadence means the steady-state CPU impact is invisible.
     private func startBranchRefreshTimer(continuation: AsyncStream<Msg>.Continuation) {
         let cwd = self.initialCwd
+        // `continuation` is captured strongly across the 30s
+        // sleep; benign because the task is cancelled in the
+        // cleanup block on loop exit.
         branchRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: TUIApp.kBranchRefreshInterval)
