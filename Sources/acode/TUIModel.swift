@@ -115,6 +115,14 @@ enum TranscriptItem: Sendable, Equatable {
     case phase(String)
     case notice(String)
     case error(String)
+    /// Direct shell invocation from the user's `!<cmd>` input. The
+    /// reducer appends this when the loop posts a `.shellEnd` Msg
+    /// (H3 in `CommandHandler` — `!` shell passthrough parity with
+    /// line mode). `output` is the combined stdout+stderr; `isError`
+    /// is the exit-status-derived flag. Rendered as a `╭ … ╰` box
+    /// similar to a tool card, but without a name (the command is
+    /// the headline) and without an expanded state.
+    case shell(command: String, output: String, isError: Bool)
 }
 
 struct ToolView: Sendable, Equatable {
@@ -247,6 +255,15 @@ enum Msg: Sendable {
     case setTasks([TaskItem])
     /// Toggles the task row's visibility. Bound to `^T` in `updateKey`.
     case toggleTasks
+    /// Appends a `.error` transcript item. Posted by the loop when a
+    /// background task (currently only the orchestrator) throws a
+    /// non-`CancellationError` failure — see L2 in `CommandHandler`.
+    case error(String)
+    /// Result of a `!` shell passthrough. The loop calls
+    /// `RunShellTool.execute` off the reducer; this Msg carries the
+    /// output back so the reducer can append a `.shell` transcript
+    /// item. See H3 in `CommandHandler` for the rationale.
+    case shellEnd(command: String, output: String, isError: Bool)
 }
 
 // MARK: - Effect
@@ -274,6 +291,14 @@ enum Effect: Sendable {
     /// Set a toast. The loop applies the wall-clock stamp and
     /// dismisses the toast after its lifetime.
     case showToast(String)
+    /// Run a shell command via `RunShellTool.execute` (no model
+    /// round-trip) and append its output as a `.shell` transcript
+    /// item. Issued when the user types `!<command>` at the prompt —
+    /// mirrors line-mode `Acode.swift:299-300` (`!` is a real shell
+    /// shortcut in line mode; the TUI previously collapsed it into a
+    /// model task, which routed the shell call through the LLM — a
+    /// regression of line-mode behavior).
+    case runShell(command: String)
 }
 
 // MARK: - update (PURE)
@@ -367,6 +392,22 @@ func update(_ m: inout TUIModel, _ msg: Msg) -> [Effect] {
 
     case .toggleTasks:
         m.tasksVisible.toggle()
+        return []
+
+    case .error(let message):
+        // Background-task failure (currently only the orchestrator
+        // throws this; see L2 in `CommandHandler`). Append a
+        // `.error` transcript row so the user sees a red line in
+        // place of the previous silent no-op.
+        m.transcript.append(.error(message))
+        return []
+
+    case .shellEnd(let command, let output, let isError):
+        // H3: result of a `!<cmd>` direct shell invocation. Append
+        // a transcript card so the user can scroll back through
+        // every shell call (and its output) made during the session.
+        m.transcript.append(.shell(command: command, output: output, isError: isError))
+        m.activity = .idle
         return []
 
     case .usage(let u):
@@ -538,9 +579,36 @@ private func updateKey(_ m: inout TUIModel, _ key: KeyEvent) -> [Effect] {
             m.activity = .thinking
             return [.runSlash(text)]
         }
-        // `!command` runs a shell command; for P4 we just send it
-        // as a task — the agent can run_shell. (Line mode treats `!`
-        // specially; the TUI keeps it simple.)
+        // H3: `!command` runs a shell command directly via
+        // `RunShellTool.execute` (no model round-trip), matching
+        // line-mode `Acode.swift:299-300`. The loop runs the call
+        // off-main and posts back a `.shellEnd` Msg so the reducer
+        // can append a transcript card. The old behavior collapsed
+        // `!` into `.submitTask` — that routed the command through
+        // the LLM as a chat message, which is both slower and
+        // brain-fidelity-wrong (the model would narrate the command
+        // instead of executing it).
+        if let bang = text.firstIndex(of: "!") {
+            // Only honor a single leading `!`; embedded `!` in a
+            // message is just text. Trim trailing whitespace from
+            // the command; the executor's first arg is the entire
+            // tail.
+            let cmd = text[text.index(after: bang)...]
+                .trimmingCharacters(in: .whitespaces)
+            if cmd.isEmpty {
+                // `!` alone with no command is a usage error —
+                // match line mode's "Prefix ! to run a shell
+                // command" help line by emitting a transcript
+                // notice and falling back to a normal task.
+                m.activity = .thinking
+                return [
+                    .submitTask(text),
+                    .showToast("Usage: !<shell command>")
+                ]
+            }
+            m.activity = .thinking
+            return [.runShell(command: cmd)]
+        }
         m.activity = .thinking
         return [.submitTask(text)]
 
@@ -881,6 +949,15 @@ private func renderedRowCount(for item: TranscriptItem, cols: Int) -> Int {
             rows += max(1, wrap(tv.output, cols: max(20, w - 2)).count)
         }
         return rows
+    case .shell(_, let output, _):
+        // H3: shell passthrough rows. The view always renders the
+        // full output (no expand/collapse) plus a 1-row headline
+        // showing `!cmd`. We count the wrapped output; the
+        // headline is always 1 row. The 2-cell indent is the
+        // view's; mirroring it here keeps the click hit-test
+        // aligned with the rendered body.
+        let body = output.isEmpty ? 0 : max(1, wrap(output, cols: max(20, w - 2)).count)
+        return 1 + body
     case .user(let s):
         return max(1, wrap("▸ " + s, cols: w).count)
     case .assistant(let s):

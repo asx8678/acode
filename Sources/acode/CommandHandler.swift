@@ -36,15 +36,18 @@ final class CommandHandler {
     /// The live agent — receives `/model` (provider switch) and `/clear`
     /// (history reset) directly.
     private let agent: Agent
-    /// Shared model id so the closure for `/plan` captures a `let` and not
-    /// a `var` (Swift 6.3 strict concurrency flags a `var` capture in a
-    /// sending `@MainActor` closure).
-    private let resolvedModel: String
+    /// Shared model id. `var` so `/model <name>` can update it in
+    /// place (H2: prior version was `let` and `/model` therefore
+    /// printed the original model after a switch). The `/plan`
+    /// closure still snapshots the current value into a `let`
+    /// before dispatch, so the sending-@MainActor capture rule
+    /// is preserved.
+    private var resolvedModel: String
     /// Provider factory used by `/model` and the orchestrator's per-role
     /// resolver. Re-derives the provider from a model name string.
     private let makeProvider: @MainActor (String) -> any LLMProvider
     /// The full tool registry.
-    private var tools: ToolRegistry
+    private let tools: ToolRegistry
     /// The TUISink so the orchestrator can drive the MVU stream.
     private let sink: TUISink
     /// Profiles for the three orchestrator roles. Config-overridable.
@@ -116,11 +119,10 @@ final class CommandHandler {
             } else {
                 let newProvider = makeProvider(args)
                 agent.switchProvider(newProvider)
-                // Note: the TUI's `resolvedModel` is captured by-value here
-                // for the closure. A future /model UX would re-create the
-                // CommandHandler so the new value flows through; the sink's
-                // `phase` + `usage` only ever print the model name once
-                // (in `status.model`), so this is acceptable for the spike.
+                // Mirror line-mode `Acode.swift:288-291` — update the
+                // cached model id so a bare `/model` after a switch
+                // reports the *new* model, not the startup one. H2 fix.
+                resolvedModel = args
                 return SlashResult(
                     notice: "Model switched to \(args).",
                     message: nil
@@ -196,12 +198,18 @@ final class CommandHandler {
 
         case "plan":
             // The orchestrator is async; the loop dispatches the actual
-            // turn on a child task (see `TUIApp.startOrchestratorTurn`).
-            // We just return a no-op SlashResult so the slash verb is
-            // visually treated as a slash command (no model call here).
-            // The TUIApp's `runSlash` effect handler peeks at the text
-            // and dispatches `startOrchestratorTurn` for the `/plan`
-            // prefix before reaching this method.
+            // turn on a child task AFTER `run(slashCommand:)` returns
+            // (see `TUIApp.handleEffect` `.runSlash`). We just return
+            // a SlashResult here so the slash verb is visually treated
+            // as a slash command. H1 fix: a bare `/plan` with no task
+            // description used to be a silent no-op — mirror line-mode
+            // `Acode.swift:206-208` and surface a usage notice.
+            if args.trimmingCharacters(in: .whitespaces).isEmpty {
+                return SlashResult(
+                    notice: "Usage: /plan <task description>",
+                    message: nil
+                )
+            }
             return SlashResult()
 
         default:
@@ -214,13 +222,20 @@ final class CommandHandler {
     /// Runs the multi-agent orchestrator on a child task. The orchestrator
     /// posts `phase(...)` via the shared `TUISink`, which the MVU stream
     /// consumes and renders. Cancellation is via the existing turn-task
-    /// pattern (Ctrl-C cancels the in-flight orchestrator). Returns
-    /// silently; the result is just "the orchestrator finished" — its
-    /// final coder output is echoed by the sink like any other turn.
-    func runOrchestrator(task: String) async {
+    /// pattern (Ctrl-C cancels the in-flight orchestrator).
+    ///
+    /// L2 fix: the prior implementation used `try?` which swallowed
+    /// *all* errors, including non-cancellation failures (provider
+    /// crash, schema rejection, etc.). The function is now `throws`,
+    /// and the caller in `TUIApp.startOrchestratorTurn` distinguishes
+    /// `CancellationError` (silent — the supersede-guard there is the
+    /// authoritative handler) from any other error (posted as a
+    /// `.error` Msg so the user sees a transcript row, mirroring
+    /// line-mode `Acode.swift:231-232` "Error: \(error)").
+    func runOrchestrator(task: String) async throws {
         let orchestrator = Orchestrator()
         let fallbackModel = resolvedModel
-        _ = try? await orchestrator.run(
+        _ = try await orchestrator.run(
             task: task,
             provider: self.makeProvider(fallbackModel),
             tools: self.tools,
@@ -245,6 +260,8 @@ final class CommandHandler {
       /auto [on|off]     show or toggle blanket auto-approve
       /allow <prefix>    add a shell command prefix to the auto-allow list
       /approvals [save]  show or persist the approval policy
+
+    Aliases: /h, /? → /help · /q, /exit → /quit
 
     Keys:
       Enter  submit

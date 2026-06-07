@@ -322,13 +322,40 @@ final class TUIApp {
             if text.hasPrefix("/plan ") {
                 let task = String(text.dropFirst("/plan".count))
                     .trimmingCharacters(in: .whitespaces)
-                startOrchestratorTurn(task: task)
+                startOrchestratorTurn(task: task, continuation: continuation)
                 return
             }
             applySlashResult(result)
 
         case .runOrchestrator(let task):
-            startOrchestratorTurn(task: task)
+            startOrchestratorTurn(task: task, continuation: continuation)
+
+        case .runShell(let command):
+            // H3: real `!` shell passthrough. Mirrors line-mode
+            // `Acode.swift:299-300` — call `RunShellTool.execute`
+            // directly (no LLM round-trip), then post a `.shellEnd`
+            // Msg back into the stream so the reducer can append a
+            // `.shell` transcript item. The executor itself is
+            // off-main + cancellable (it owns the process box and
+            // pipes), so this is safe to await from the loop task.
+            turnTask?.cancel()
+            turnTask = Task { [weak self, continuation] in
+                let result = await RunShellTool.execute(command: command, timeout: 60)
+                // Cancellation lands as `output: "Cancelled."` with
+                // `isError: true` from the executor; we treat any
+                // cancellation-thrown here as a normal result row
+                // (the user gets feedback either way). The `if
+                // !Task.isCancelled` guard mirrors the agent-run
+                // path — a supersede-guard against a newer turn
+                // that's already taken over.
+                if Task.isCancelled { return }
+                continuation.yield(.shellEnd(
+                    command: command,
+                    output: result.output,
+                    isError: result.isError
+                ))
+                _ = self
+            }
 
         case .showToast(let text):
             // Stamp `bornTick` here; the render uses `(tick - bornTick)`
@@ -372,14 +399,26 @@ final class TUIApp {
     /// posts phases via the TUISink, which the MVU stream consumes
     /// and renders. Cancellation is via the existing turn-task
     /// pattern; `^C` cancels the in-flight orchestrator.
-    private func startOrchestratorTurn(task: String) {
+    ///
+    /// L2 fix: `commandHandler.runOrchestrator` is now `throws`. A
+    /// `CancellationError` is silently swallowed (the supersede-guard
+    /// below is the authoritative cancellation path); any other
+    /// failure is posted as a `.error` Msg so the user sees a
+    /// transcript row instead of a silent no-op (mirrors line-mode
+    /// `Acode.swift:231-232`).
+    private func startOrchestratorTurn(task: String, continuation: AsyncStream<Msg>.Continuation) {
         turnTask?.cancel()
         turnTask = Task { [commandHandler] in
-            // The `commandHandler` is set via `setCommandHandler` before
-            // `run()` is called, so by the time this fires the IUO is
-            // non-nil. The `!` is the documented contract — see the
-            // property's docstring.
-            _ = await commandHandler!.runOrchestrator(task: task)
+            do {
+                try await commandHandler!.runOrchestrator(task: task)
+            } catch is CancellationError {
+                // Cooperative cancellation; the supersede-guard
+                // below is the authoritative handler. Silent.
+            } catch {
+                // Real failure (provider crash, schema rejection,
+                // etc.). Surface as a transcript error row.
+                continuation.yield(.error("Orchestrator error: \(error)"))
+            }
             // Same supersede-guard as the agent.run path above: a
             // cancelled orchestrator task means a newer turn (or
             // ^C) took over; don't clobber the new turn's state.

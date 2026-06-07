@@ -17,10 +17,19 @@ struct Command: Sendable, Equatable, Hashable {
 
 /// The canonical slash-command list. Order is the order the palette and
 /// `/help` present them in (the palette re-sorts on a query via `fuzzy`).
+/// Aliases (`/h`, `/?`, `/q`, `/exit`) are listed after their canonical
+/// form so a single fuzzy query still surfaces the canonical entry
+/// first; M1 fix — the prior version only had the canonical names in
+/// the palette, so a user typing `h` got nothing highlighted and a user
+/// who never knew about `/help` couldn't discover `/h`.
 nonisolated let allCommands: [Command] = [
     Command(name: "/help",      blurb: "show this help"),
+    Command(name: "/h",         blurb: "alias for /help"),
+    Command(name: "/?",         blurb: "alias for /help"),
     Command(name: "/clear",     blurb: "clear conversation history"),
     Command(name: "/quit",      blurb: "exit the TUI"),
+    Command(name: "/q",         blurb: "alias for /quit"),
+    Command(name: "/exit",      blurb: "alias for /quit"),
     Command(name: "/model",     blurb: "show or switch the active model"),
     Command(name: "/plan",      blurb: "run multi-agent planner → coder → reviewer"),
     Command(name: "/theme",     blurb: "switch palette (e.g. /theme dark)"),

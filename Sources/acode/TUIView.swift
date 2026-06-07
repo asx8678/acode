@@ -379,6 +379,18 @@ private func renderTranscript(
             let run = Array(items[i..<j])
             flat.append(contentsOf: renderToolRun(run, cols: cols, theme: theme, depth: depth, now: now))
             i = j
+        } else if case .shell = items[i] {
+            // H3: consecutive `.shell` items also group into a run
+            // with a `╭ ├ ╰` connector tree (matches the tool-card
+            // look so the transcript feels uniform whether the
+            // output came from a tool or a `!` passthrough).
+            var j = i
+            while j < items.count {
+                if case .shell = items[j] { j += 1 } else { break }
+            }
+            let run = Array(items[i..<j])
+            flat.append(contentsOf: renderShellRun(run, cols: cols, theme: theme, depth: depth))
+            i = j
         } else {
             flat.append(contentsOf: renderTranscriptItem(items[i], cols: cols, theme: theme, depth: depth))
             i += 1
@@ -435,6 +447,11 @@ private func renderTranscriptItem(
     case .error(let s):
         let head = "\(sgr(theme.err, depth))\(sgrReset()) "
         return wrap(head + s, cols: cols)
+    case .shell:
+        // Should not appear here — shell items are intercepted by
+        // `renderTranscript` and grouped via `renderShellRun`. The
+        // unreachable branch keeps the switch total.
+        return [""]
     }
 }
 
@@ -492,6 +509,87 @@ private func renderToolView(
         let indent = "  "
         for chunk in wrap(tv.output, cols: cols - 2) {
             lines.append(indent + sgr(theme.dim, depth) + chunk + sgrReset())
+        }
+    }
+    return lines
+}
+
+// MARK: - Shell run (H3)
+
+/// Renders a consecutive run of `.shell` items as a `╭ ├ ╰`
+/// box-drawing tree, mirroring the tool-card look. The headline
+/// for each shell is the command prefixed with `!`; the body is
+/// the wrapped output. There is no expand/collapse and no
+/// spinner — a `!` passthrough is instantaneous from the
+/// transcript's POV (the body lands all at once in the
+/// `.shellEnd` Msg).
+private func renderShellRun(
+    _ items: [TranscriptItem],
+    cols: Int,
+    theme: Theme,
+    depth: ColorDepth
+) -> [String] {
+    var out: [String] = []
+    let count = items.count
+    for (idx, item) in items.enumerated() {
+        guard case .shell(let cmd, let output, let isError) = item else { continue }
+        let connector: String
+        if count == 1 {
+            connector = "  "
+        } else if idx == 0 {
+            connector = "╭ "
+        } else if idx == count - 1 {
+            connector = "╰ "
+        } else {
+            connector = "├ "
+        }
+        out.append(contentsOf: renderShellView(
+            command: cmd,
+            output: output,
+            isError: isError,
+            connector: connector,
+            cols: cols,
+            theme: theme,
+            depth: depth
+        ))
+    }
+    return out
+}
+
+/// Renders one shell invocation. Headline: `! <command> <exit>`,
+/// then the (optional) wrapped output. Exit status is the single
+/// `!` row's only status — ok=green dim check, err=red `!` —
+/// chosen to be visually distinct from the ok/err tool colors
+/// so a casual scroll doesn't conflate the two.
+private func renderShellView(
+    command: String,
+    output: String,
+    isError: Bool,
+    connector: String,
+    cols: Int,
+    theme: Theme,
+    depth: ColorDepth
+) -> [String] {
+    let dim = sgr(theme.dim, depth)
+    let reset = sgrReset()
+    let statusColor: String
+    let statusGlyph: String
+    if isError {
+        statusColor = sgr(theme.err, depth)
+        statusGlyph = "ERR"
+    } else {
+        statusColor = sgr(theme.ok, depth)
+        statusGlyph = "OK "
+    }
+    // Use the dim connector (no "tree" for a single shell; tree
+    // glyphs are emitted by `renderShellRun` for multi-shell
+    // groupings).
+    let head = "\(dim)\(connector)\(reset) \(statusColor)[\(statusGlyph)]\(reset) \(sgr(theme.accentA, depth))! \(command)\(reset)"
+    var lines = wrap(head, cols: cols)
+    if !output.isEmpty {
+        let indent = "  "
+        for chunk in wrap(output, cols: max(20, cols - 2)) {
+            lines.append(indent + dim + chunk + reset)
         }
     }
     return lines
