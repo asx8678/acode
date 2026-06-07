@@ -288,3 +288,105 @@ private func assertPairsIntact(_ messages: [Message]) {
     // Pairing invariant check.
     assertPairsIntact(decoded.conversation.messages)
 }
+
+@Test func test_session_roundtrip_preserves_4message_fidelity() throws {
+    // Round-trip fidelity acceptance (swift-be0.5, clause 1): a Session
+    // whose conversation is the canonical four-message shape — a user
+    // turn, an assistant turn carrying tool calls, the tool results
+    // for those calls (B2 pair), and a SECOND user turn trailing the
+    // pair — must survive an encode→decode round-trip as a single
+    // byte-stable, value-equal record.
+    //
+    // The existing `test_session_roundtrip_preserves_b2_pairing`
+    // covers the B2 pair + a final assistant, but stops short of a
+    // trailing user turn and does not assert Equatable or
+    // byte-stability. This test fills that exact gap.
+    let callA = ToolCall(
+        id: "call_fid_a",
+        name: "read_file",
+        arguments: .object(["path": .string("/tmp/fid-a.txt")])
+    )
+    let callB = ToolCall(
+        id: "call_fid_b",
+        name: "read_file",
+        arguments: .object(["path": .string("/tmp/fid-b.txt")])
+    )
+    var convo = Conversation()
+    convo.append(.user("read both files"))
+    convo.append(.assistant(
+        text: "Reading both files now.",
+        toolCalls: [callA, callB]
+    ))
+    convo.append(.toolResults([
+        ToolResult(callID: "call_fid_a", output: "contents of A", isError: false),
+        ToolResult(callID: "call_fid_b", output: "contents of B", isError: false),
+    ]))
+    convo.append(.user("now summarize"))
+
+    let created = Date(timeIntervalSince1970: 1_700_000_000)
+    let updated = Date(timeIntervalSince1970: 1_700_000_500)
+    let session = Session(
+        id: "fidelity-4msg",
+        title: "four-message fidelity",
+        model: "claude-sonnet-4-5",
+        createdAt: created,
+        updatedAt: updated,
+        conversation: convo
+    )
+
+    // Encode.
+    let encoded = try Session.encoder().encode(session)
+
+    // Decode.
+    let decoded = try Session.decoder().decode(Session.self, from: encoded)
+
+    // Value-equal: every field round-trips. Field-by-field because
+    // Session/Conversation are not currently Equatable — widening
+    // their protocol list here would also change the error surface
+    // of the (already-broken-under-Xcode) AgentSessionSeamTests,
+    // which is out of scope for this bead. If a future bead adds
+    // `Equatable` to both types, this collapses to a single
+    // `decoded == session` line.
+    #expect(decoded.id == session.id)
+    #expect(decoded.title == session.title)
+    #expect(decoded.model == session.model)
+    #expect(decoded.version == session.version)
+    #expect(decoded.createdAt == session.createdAt)
+    #expect(decoded.updatedAt == session.updatedAt)
+    #expect(decoded.conversation.messages == session.conversation.messages)
+
+    // Order preserved end-to-end, including the trailing user turn
+    // that distinguishes this case from the existing B2 test.
+    #expect(decoded.conversation.messages.count == 4)
+    guard case .user(let msg0) = decoded.conversation.messages[0] else {
+        Issue.record("Expected .user at index 0")
+        return
+    }
+    #expect(msg0 == "read both files")
+    guard case .assistant(_, let midCalls) = decoded.conversation.messages[1] else {
+        Issue.record("Expected .assistant(toolCalls:) at index 1")
+        return
+    }
+    #expect(midCalls.map(\.id) == ["call_fid_a", "call_fid_b"])
+    guard case .toolResults(let midResults) = decoded.conversation.messages[2] else {
+        Issue.record("Expected .toolResults at index 2")
+        return
+    }
+    #expect(Set(midResults.map(\.callID)) == ["call_fid_a", "call_fid_b"])
+    guard case .user(let msg3) = decoded.conversation.messages[3] else {
+        Issue.record("Expected second .user at index 3 (the trailing user turn)")
+        return
+    }
+    #expect(msg3 == "now summarize")
+
+    // B2 pair intact.
+    assertPairsIntact(decoded.conversation.messages)
+
+    // Byte-stable: re-encoding the decoded Session must produce the
+    // exact same bytes. The encoder uses .iso8601 + .sortedKeys +
+    // .prettyPrinted so the output is deterministic; if a future
+    // change introduces nondeterminism (e.g. dictionary-key ordering
+    // leakage from a custom JSONValue encoder), this catches it.
+    let reencoded = try Session.encoder().encode(decoded)
+    #expect(reencoded == encoded)
+}
