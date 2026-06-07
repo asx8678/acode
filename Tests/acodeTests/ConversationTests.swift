@@ -167,12 +167,9 @@ private func assertPairsIntact(_ messages: [Message]) {
     }
 }
 
-@Test func test_session_save_load() throws {
-    let tmpDir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("acode-test-\(UUID().uuidString)")
-    defer { try? FileManager.default.removeItem(at: tmpDir) }
+// MARK: - Session serialization (P1: swift-be0.1)
 
-    // We can't easily override sessionsDir, so we test the encode/decode path directly
+@Test func test_session_save_load() throws {
     var convo = Conversation()
     convo.append(.user("test message"))
     convo.append(.assistant(text: "response", toolCalls: []))
@@ -186,11 +183,108 @@ private func assertPairsIntact(_ messages: [Message]) {
         conversation: convo
     )
 
-    let data = try JSONEncoder().encode(session)
-    let decoded = try JSONDecoder().decode(Session.self, from: data)
+    // Default memberwise init stamps the current schema version.
+    #expect(session.version == Session.currentVersion)
+
+    let data = try Session.encoder().encode(session)
+    let decoded = try Session.decoder().decode(Session.self, from: data)
 
     #expect(decoded.id == "test-session-1")
     #expect(decoded.title == "Test Session")
     #expect(decoded.model == "claude-sonnet-4-5")
+    #expect(decoded.version == Session.currentVersion)
+    #expect(decoded.createdAt == session.createdAt)
+    #expect(decoded.updatedAt == session.updatedAt)
     #expect(decoded.conversation.messages.count == 2)
+}
+
+@Test func test_session_encoder_uses_iso8601_dates() throws {
+    // The on-disk format must be human-readable + stable across runs.
+    let session = Session(
+        id: "iso-check",
+        title: nil,
+        model: nil,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_500),
+        conversation: Conversation()
+    )
+
+    let data = try Session.encoder().encode(session)
+    let json = String(decoding: data, as: UTF8.self)
+
+    // ISO 8601 with the Z suffix is what `.iso8601` produces.
+    #expect(json.contains("\"createdAt\" : \"2023-11-14T22:13:20Z\""))
+    #expect(json.contains("\"updatedAt\" : \"2023-11-14T22:21:40Z\""))
+    // Sorted + pretty output for diff-friendly on-disk files.
+    #expect(json.contains("\n"))
+    #expect(json.contains("\"conversation\""))
+}
+
+@Test func test_session_decoder_is_forward_compatible_without_version() throws {
+    // A pre-versioned hand-rolled file must still decode to currentVersion
+    // (B2-compatible: this is what older binaries wrote).
+    let legacyJSON = """
+    {
+      "id": "legacy-1",
+      "title": "no version key",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-02T00:00:00Z",
+      "conversation": { "messages": [] }
+    }
+    """
+
+    let decoded = try Session.decoder().decode(Session.self, from: Data(legacyJSON.utf8))
+    #expect(decoded.id == "legacy-1")
+    #expect(decoded.title == "no version key")
+    #expect(decoded.version == Session.currentVersion)
+    #expect(decoded.conversation.messages.isEmpty)
+}
+
+@Test func test_session_roundtrip_preserves_b2_pairing() throws {
+    // Hard test of the B2 invariant: an assistant tool_use immediately
+    // followed by its .toolResults must survive a full Session encode→decode
+    // round-trip in the same order, with the same call IDs.
+    let call = ToolCall(
+        id: "call_b2",
+        name: "read_file",
+        arguments: .object(["path": .string("/tmp/b2.txt")])
+    )
+    var convo = Conversation()
+    convo.append(.user("read the file"))
+    convo.append(.assistant(text: "Reading now.", toolCalls: [call]))
+    convo.append(.toolResults([
+        ToolResult(callID: "call_b2", output: "file contents", isError: false)
+    ]))
+    convo.append(.assistant(text: "It contains 'file contents'.", toolCalls: []))
+
+    let session = Session(
+        id: "b2-roundtrip",
+        title: "B2 pairing",
+        model: "claude-sonnet-4-5",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_999),
+        conversation: convo
+    )
+
+    let data = try Session.encoder().encode(session)
+    let decoded = try Session.decoder().decode(Session.self, from: data)
+
+    // Order preserved.
+    #expect(decoded.conversation.messages.count == 4)
+    // Tool_use at index 1, tool_results at index 2 — unchanged.
+    guard case .assistant(_, let calls) = decoded.conversation.messages[1] else {
+        Issue.record("Expected assistant tool_use at index 1")
+        return
+    }
+    #expect(calls.first?.id == "call_b2")
+
+    guard case .toolResults(let results) = decoded.conversation.messages[2] else {
+        Issue.record("Expected toolResults at index 2")
+        return
+    }
+    #expect(results.first?.callID == "call_b2")
+    #expect(results.first?.output == "file contents")
+
+    // Pairing invariant check.
+    assertPairsIntact(decoded.conversation.messages)
 }
