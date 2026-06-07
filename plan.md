@@ -45,8 +45,9 @@ endpoints), on-demand "skills", and an optional planner→coder→reviewer multi
 whole single-agent tool around 1,250 lines across ~14 files with one external dependency.
 
 **Non-goals (v1).** No MCP, no browser automation, no durable execution, no provider zoo, no plugin
-or skill *marketplace*, no pub/sub message bus, no session database, no attachments, no background
-processes, no auto-commit, no TUI. See §G for the full list and the reasoning.
+or skill *marketplace*, no pub/sub message bus, no **session database** (the lightweight per-session
+JSON alternative landed in v2 — see §G), no attachments, no background processes, no auto-commit,
+no TUI. See §G for the full list and the reasoning.
 
 ---
 
@@ -612,10 +613,18 @@ reviews, and converges through ≥1 review round; `swift test` green.
 MCP servers; browser/Playwright automation; durable execution / checkpointing; a multi-provider
 factory or round-robin routing; a plugin/skill **marketplace** (the lightweight skills mechanism in
 T4.1 *is* in scope); a pub/sub message bus (the `Renderer` is enough until a second subscriber exists);
-session databases; image/document attachments; background shell processes; auto-commits; a fancy TUI;
-and the on-device Foundation Models backend — it dispatches tool calls in-process, which would bypass
-the approval gate, the path jail, and the per-role tool allowlist, so it is out of scope for v1. If any
-of these appears in a diff, the reviewer rejects it.
+image/document attachments; background shell processes; auto-commits; a fancy TUI; and the on-device
+Foundation Models backend — it dispatches tool calls in-process, which would bypass the approval
+gate, the path jail, and the per-role tool allowlist, so it is out of scope for v1. If any of these
+appears in a diff, the reviewer rejects it.
+
+> **Note (v2, swift-be0):** Session persistence is **not** excluded — it is implemented as lightweight
+> per-session JSON files under `~/.config/acode/sessions/<id>.json` (one file per session), not a
+> database. Writes are atomic with a `<id>.json.bak` backup of the previous good copy (mirrors the
+> `saveApprovals` pattern in `Config.swift`). The on-disk schema is split: a pure-data `Session` plus
+> a file-backed `SessionStore` (with an injectable `baseDir` for testability), and uses ISO 8601
+> timestamps plus a `version` field for forward-compat. The full message history is encoded
+> verbatim — the B2 tool-call/tool-result pairing invariant is preserved across save/load.
 
 ---
 
