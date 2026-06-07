@@ -387,6 +387,21 @@ final class TUIApp {
             // activity to .thinking. The handler returns a result
             // with an optional toast / notice / quit. The toast's
             // `bornTick` is stamped here (the loop owns the clock).
+            //
+            // swift-be0.7 #4: `/resume` and friends must cancel
+            // any in-flight turn BEFORE the handler runs, so the
+            // resume doesn't replace the transcript over a model
+            // that's still streaming. The previous behavior left
+            // the turn running until the agent noticed (a
+            // supersede race). The cancel mirrors the
+            // `.runShell` effect handler above and the
+            // `.submitTask` handler further up.
+            let body = text.hasPrefix("/") ? String(text.dropFirst()) : text
+            let verb = body.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? ""
+            if verb == "resume" {
+                turnTask?.cancel()
+                model.activity = .idle
+            }
             let result = commandHandler.run(slashCommand: text)
             // For `/plan` the slash verb is `plan` with the task as
             // its argument. The handler doesn't know about /plan; we

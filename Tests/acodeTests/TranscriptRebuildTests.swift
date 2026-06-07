@@ -148,3 +148,72 @@ import Testing
     let items = transcriptItems(from: Conversation())
     #expect(items.isEmpty)
 }
+
+@MainActor
+@Test func test_transcript_items_parallel_tool_results_match_by_callID() {
+    // swift-be0.7 #6: a single assistant turn with two PARALLEL
+    // tool_use (a, b) produces a `.toolResults` with two
+    // results, in some order — the order is not guaranteed by
+    // either provider API (Anthropic streams them as they
+    // finish; OpenAI sends them as a single block). The old
+    // `lastIndex` matching paired results with the latest
+    // running row regardless of `callID`, so a result for `a`
+    // could end up on the `b` card. The fix matches by
+    // `callID`; this test pins the contract.
+    var convo = Conversation()
+    let callA = ToolCall(id: "alpha", name: "read_file", arguments: .object([:]))
+    let callB = ToolCall(id: "beta",  name: "read_file", arguments: .object([:]))
+    convo.append(.user("read both"))
+    convo.append(.assistant(text: "Reading both.", toolCalls: [callA, callB]))
+    // Results arrive in REVERSED order (Beta finishes first).
+    // The mapper must still attach "alpha output" to the alpha
+    // card and "beta output" to the beta card.
+    convo.append(.toolResults([
+        ToolResult(callID: "beta",  output: "beta output", isError: false),
+        ToolResult(callID: "alpha", output: "alpha output", isError: false),
+    ]))
+
+    let items = transcriptItems(from: convo)
+    // user + assistant text + 2 tool views = 4 items
+    #expect(items.count == 4)
+
+    // Find the two .tool rows and assert each carries the
+    // output of its own call (not the other's).
+    let toolRows: [ToolView] = items.compactMap {
+        if case .tool(let tv) = $0 { return tv } else { return nil }
+    }
+    #expect(toolRows.count == 2)
+    let alphaRow = toolRows.first { $0.callID == "alpha" }
+    let betaRow = toolRows.first { $0.callID == "beta" }
+    #expect(alphaRow?.output == "alpha output")
+    #expect(alphaRow?.status == .ok)
+    #expect(betaRow?.output == "beta output")
+    #expect(betaRow?.status == .ok)
+}
+
+@MainActor
+@Test func test_transcript_items_parallel_tool_results_match_one_error() {
+    // Same shape as above but with one of the parallel
+    // tool calls failing. The error status must land on the
+    // correct card; the success status on the other.
+    var convo = Conversation()
+    let callA = ToolCall(id: "alpha", name: "read_file", arguments: .object([:]))
+    let callB = ToolCall(id: "beta",  name: "read_file", arguments: .object([:]))
+    convo.append(.user("read both"))
+    convo.append(.assistant(text: "Reading both.", toolCalls: [callA, callB]))
+    convo.append(.toolResults([
+        ToolResult(callID: "alpha", output: "alpha output", isError: false),
+        ToolResult(callID: "beta",  output: "beta boom",    isError: true),
+    ]))
+
+    let items = transcriptItems(from: convo)
+    let toolRows: [ToolView] = items.compactMap {
+        if case .tool(let tv) = $0 { return tv } else { return nil }
+    }
+    let alphaRow = toolRows.first { $0.callID == "alpha" }
+    let betaRow = toolRows.first { $0.callID == "beta" }
+    #expect(alphaRow?.status == .ok)
+    #expect(alphaRow?.output == "alpha output")
+    #expect(betaRow?.status == .error)
+    #expect(betaRow?.output == "beta boom")
+}

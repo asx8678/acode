@@ -131,6 +131,18 @@ struct ToolView: Sendable, Equatable {
     var output: String
     var status: ToolStatus
     var expanded: Bool
+    /// swift-be0.7 #6: the originating `ToolCall.id`. `nil` for
+    /// tools that started before this field was added (legacy
+    /// view rows from a pre-fix-up build) or for tools whose
+    /// `id` was empty at start. The transcript rebuild
+    /// (`transcriptItems(from:)`) uses this to match results
+    /// to the *correct* running call when the model emits
+    /// multiple / parallel tool calls. The live `.toolEnd`
+    /// reducer uses this for the same reason: matching on
+    /// name+status alone was wrong when the same tool was
+    /// invoked twice in one turn (the latest one always
+    /// won, which shuffled output across the wrong cards).
+    var callID: String? = nil
     /// Wall-clock stamp of when the tool started. Set by the **loop**
     /// (not the reducer — the reducer is pure). `nil` until the loop
     /// stamps it; the view falls back to "…" when missing.
@@ -363,22 +375,37 @@ func update(_ m: inout TUIModel, _ msg: Msg) -> [Effect] {
             summary: ToolView.summary(for: call),
             output: "",
             status: .running,
-            expanded: false
+            expanded: false,
+            // swift-be0.7 #6: stamp the originating call id so
+            // `.toolEnd` can match results to the *correct* row
+            // when the model emits multiple / parallel tool
+            // calls (matching by name was wrong in that case).
+            callID: call.id
         )))
         m.activity = .runningTool(name: call.name)
         return []
 
     case .toolEnd(let call, let r):
-        // Find the most recent running tool view whose name matches and
-        // upgrade it to ok/error. There can be multiple tools with the
-        // same name (e.g. two `run_shell` calls); the latest one wins,
-        // which matches user expectation.
-        if let idx = m.transcript.lastIndex(where: {
-            if case .tool(let tv) = $0, tv.name == call.name, tv.status == .running {
+        // swift-be0.7 #6: match the result to the running row
+        // whose `callID` matches the result's `callID`. Falling
+        // back to the latest running row with the same name
+        // preserves the historical behavior for older `ToolView`
+        // rows that don't carry a `callID` (pre-fix-up builds,
+        // hand-rolled fixtures, and the reduced race where two
+        // distinct calls share an empty id).
+        let byID: Int? = m.transcript.lastIndex(where: {
+            if case .tool(let tv) = $0, tv.callID == call.id, tv.status == .running {
                 return true
             }
             return false
-        }) {
+        })
+        let byName: Int? = m.transcript.lastIndex(where: {
+            if case .tool(let tv) = $0, tv.callID == nil, tv.name == call.name, tv.status == .running {
+                return true
+            }
+            return false
+        })
+        if let idx = byID ?? byName {
             if case .tool(var tv) = m.transcript[idx] {
                 tv.output = r.output
                 tv.status = r.isError ? .error : .ok
@@ -857,23 +884,48 @@ func transcriptItems(from conversation: Conversation) -> [TranscriptItem] {
                     output: "",
                     status: .running,
                     expanded: false,
+                    // swift-be0.7 #6: carry the originating call
+                    // id so the `.toolResults` branch above
+                    // can match the correct result to the
+                    // correct row (see the long comment
+                    // there).
+                    callID: call.id,
                     startedAt: nil,
                     endedAt: nil
                 )))
             }
 
         case .toolResults(let results):
-            // Fill in the most recent still-running tool row per
-            // result. We match in arrival order against the most
-            // recent unmatched running row, which preserves B2
-            // pairing when the saved conversation is well-formed.
+            // swift-be0.7 #6: match each result to the running
+            // row whose `callID` matches the result's
+            // `callID`. The previous implementation matched
+            // results to the *latest* running row regardless
+            // of which call the result was for, which
+            // shuffled output across the wrong tool cards
+            // when the model emitted multiple / parallel
+            // tool_use in one turn.
+            //
+            // Two layers of fallback preserve the historical
+            // behavior for any pre-fix-up row that doesn't
+            // carry a `callID`:
+            //   1. exact match by `callID`
+            //   2. latest running row whose name matches
+            //      the result (defensive — for malformed /
+            //      hand-rolled conversations)
             for result in results {
-                if let idx = items.lastIndex(where: {
-                    if case .tool(let tv) = $0, tv.status == .running {
+                let byID: Int? = items.lastIndex(where: {
+                    if case .tool(let tv) = $0, tv.callID == result.callID, tv.status == .running {
                         return true
                     }
                     return false
-                }) {
+                })
+                let byName: Int? = items.lastIndex(where: {
+                    if case .tool(let tv) = $0, tv.callID == nil, tv.name != "", tv.status == .running {
+                        return true
+                    }
+                    return false
+                })
+                if let idx = byID ?? byName {
                     if case .tool(var tv) = items[idx] {
                         tv.output = result.output
                         tv.status = result.isError ? .error : .ok

@@ -260,6 +260,22 @@ final class CommandHandler {
         let nameArg = trimmed.isEmpty ? nil : trimmed
 
         let history = agent.history
+
+        // swift-be0.7 #9: refuse to save an empty conversation.
+        // A `/save` against a fresh agent (or after `/clear`)
+        // used to write a 0-message session file, which then
+        // showed up in `/sessions` as a noise row and — worse
+        // — a candidate for `/resume` whose load was a no-op
+        // (the user resumed into a blank screen and had to
+        // figure out why). The user clearly didn't mean to
+        // save nothing. Surface a notice and skip the write.
+        if history.messages.isEmpty {
+            return SlashResult(
+                notice: "Nothing to save: conversation is empty. Send a message or /resume a session first.",
+                message: nil
+            )
+        }
+
         let title = nameArg ?? deriveSessionTitle(from: history)
         let now = Date()
 
@@ -354,7 +370,7 @@ final class CommandHandler {
             // Mirrors the line-mode `Acode.runREPL` /resume branch
             // so the two surfaces stay in parity.
             agent.restore(session.conversation)
-            let items = transcriptItems(from: session.conversation)
+            let rebuilt = transcriptItems(from: session.conversation)
             var newModel: String? = nil
             if let savedModel = session.model, savedModel != resolvedModel {
                 let newProvider = makeProvider(savedModel)
@@ -362,15 +378,36 @@ final class CommandHandler {
                 resolvedModel = savedModel
                 newModel = savedModel
             }
-            // Update the status model id (HUD/wordmark) so the user
-            // can see the switch landing in the chrome.
+            // swift-be0.7 #3: prepend the "Resumed" notice INTO
+            // the items passed to `replaceTranscript`, so the
+            // notice survives the replace (previously it was
+            // returned via `SlashResult.notice` and overwritten
+            // one frame later by `applySlashResult` appending
+            // it to a model that was then itself replaced by
+            // the resume path). Mirrors the boot-time path in
+            // `Acode.runTUISession`.
+            //
+            // swift-be0.7 #4: cancel any in-flight turn FIRST
+            // so the resume doesn't trample a model that's
+            // mid-stream. The `.runShell` effect handler
+            // already does this; `.runSlash` did not.
+            let shortID = String(session.id.prefix(8))
+            let title = session.title ?? "(untitled)"
+            let count = session.conversation.messages.count
+            let noticeText = "Resumed \(shortID): \(title) — \(count) messages."
+            var items: [TranscriptItem] = [.notice(noticeText)]
+            items.append(contentsOf: rebuilt)
             app?.replaceTranscript(items, model: newModel)
             currentSession = session
 
-            let shortID = String(session.id.prefix(8))
-            let count = session.conversation.messages.count
+            // Still return a toast (the visible "Session resumed"
+            // pill — that's a separate channel from the
+            // transcript notice and won't be overwritten), and
+            // skip the `notice:` so we don't double-paint the
+            // same line. The toast is the only ephemeral
+            // feedback for the resume.
             return SlashResult(
-                notice: "Resumed \(shortID): \(session.title ?? "(untitled)") — \(count) messages.",
+                notice: nil,
                 message: "Session resumed"
             )
         }
