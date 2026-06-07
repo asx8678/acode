@@ -1,6 +1,5 @@
 import Darwin
 import Foundation
-import AcodeCore
 
 // MARK: - TUIApp
 
@@ -41,8 +40,12 @@ final class TUIApp {
     /// Slash-command dispatch + the live runtime (agent, provider,
     /// session, orchestrator). The loop calls into this for
     /// `.runSlash` / `.runOrchestrator` effects. The reducer never
-    /// sees it.
-    private let commandHandler: CommandHandler
+    /// sees it. Held as `var` so the bootstrap can wire it via
+    /// `setCommandHandler` after both objects exist (the handler
+    /// holds a weak ref back to the app, and the app holds a
+    /// strong ref to the handler — only one direction needs to be
+    /// set after construction).
+    private var commandHandler: CommandHandler!
 
     // MARK: - State
     private var model: TUIModel
@@ -70,7 +73,6 @@ final class TUIApp {
     init(
         agent: Agent,
         sink: TUISink,
-        commandHandler: CommandHandler,
         terminal: Terminal,
         model: TUIModel,
         theme: Theme = .dark,
@@ -79,7 +81,11 @@ final class TUIApp {
     ) {
         self.agent = agent
         self.sink = sink
-        self.commandHandler = commandHandler
+        // `commandHandler` is left nil here; `Acode.runTUISession` wires
+        // it via `setCommandHandler` after the bootstrap. The type is
+        // `CommandHandler!` (IUO) so call sites can dereference without
+        // a `?` — the contract is: don't call into the loop before
+        // `run()` (which is the only place that dispatches effects).
         self.terminal = terminal
         self.model = model
         self.theme = theme
@@ -94,6 +100,16 @@ final class TUIApp {
     func setApprovalPolicy(_ policy: ApprovalPolicy) {
         self.policy = policy
         sink.setApprovalPolicy(policy)
+    }
+
+    /// Wires (or rewires) the slash-command dispatcher. Called by the
+    /// `Acode.runTUISession` bootstrap after both `TUIApp` and
+    /// `CommandHandler` exist (the handler needs a weak ref to the
+    /// app for `/theme`; the app needs the handler to dispatch
+    /// `.runSlash` effects). The setter is the standard pattern used
+    /// for `setApprovalPolicy` and `setTheme`.
+    func setCommandHandler(_ handler: CommandHandler) {
+        self.commandHandler = handler
     }
 
     /// Switches the active theme. Called by `CommandHandler` when the
@@ -359,7 +375,11 @@ final class TUIApp {
     private func startOrchestratorTurn(task: String) {
         turnTask?.cancel()
         turnTask = Task { [commandHandler] in
-            _ = await commandHandler.runOrchestrator(task: task)
+            // The `commandHandler` is set via `setCommandHandler` before
+            // `run()` is called, so by the time this fires the IUO is
+            // non-nil. The `!` is the documented contract — see the
+            // property's docstring.
+            _ = await commandHandler!.runOrchestrator(task: task)
             // Same supersede-guard as the agent.run path above: a
             // cancelled orchestrator task means a newer turn (or
             // ^C) took over; don't clobber the new turn's state.

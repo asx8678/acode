@@ -1,22 +1,44 @@
 import Foundation
-import AcodeCore
+
+// MARK: - ColorDepth
+
+/// Color depth the active terminal supports. The Theme layer gates every
+/// escape sequence on this so a 16-color terminal never receives a raw
+/// `\\e[38;2;r;g;bm`. Detection in `Capabilities.detect`.
+enum ColorDepth: Sendable, Equatable {
+    case mono         // no color at all
+    case x16          // the ANSI 16-color palette
+    case x256         // 256-color palette (xterm)
+    case truecolor    // 24-bit RGB
+}
+
+// MARK: - GraphicsProtocol
+
+/// Inline-image / graphics protocol the active terminal supports. The
+/// `DiffView` and the future graphics tier check this before emitting
+/// their escape sequences. `Capabilities.detect` chooses the best match
+/// from the environment.
+enum GraphicsProtocol: Sendable, Equatable {
+    case none
+    case iterm        // iTerm2 inline images
+    case kitty        // Kitty graphics protocol
+    case sixel        // DEC Sixel
+}
 
 // MARK: - Capabilities
 //
-// `ColorDepth` and `GraphicsProtocol` live in `AcodeCore` (extracted during
-// the Phase 1 restructure) so the shared formatting layer (`Theme`,
-// `DiffView`, `Highlight`) can produce escape sequences without depending on
-// this CLI-only detection layer. The probing logic that turns env vars +
-// `Terminal` queries into a concrete `ColorDepth` value still lives here in
-// the CLI target.
+// `ColorDepth` and `GraphicsProtocol` are the cross-cutting types the
+// formatting layer (`Theme`, `DiffView`, `Highlight`) shares with the
+// detection layer. They live at the top of this file (not behind a
+// separate module) for the single-target build.
 
 /// Terminal capabilities detected once at startup. The whole UI is a
 /// function of this struct, so one code path serves every terminal
 /// (Terminal.app, iTerm, kitty, WezTerm, ssh pipe).
 ///
 /// **Non-TTY (`-p`, pipe, CI) → the existing line renderer, no escapes
-/// emitted.** The P1 throwaway harness only enters raw mode when both
-/// stdin and stdout are TTYs, so non-TTY runs never see this struct.
+/// emitted.** The TUI only enters raw mode when both stdin and stdout
+/// are TTYs, so non-TTY runs never see this struct.
 struct Capabilities: Sendable {
     var color: ColorDepth
     var graphics: GraphicsProtocol
@@ -26,8 +48,8 @@ struct Capabilities: Sendable {
 
     /// Probe from environment + a `Terminal` handle. The `term` argument is
     /// reserved for queries that need a live terminal (e.g. DA1 for sixel)
-    /// — not yet used in P1. `NO_COLOR` (https://no-color.org) trumps
-    /// everything else.
+    /// — not yet used. `NO_COLOR` (https://no-color.org) trumps everything
+    /// else.
     static func detect(env: [String: String], term: Terminal) -> Capabilities {
         var caps = Capabilities(
             color: .x16,

@@ -65,7 +65,8 @@ func runCancellable(_ work: @escaping () async throws -> Void, renderer: any Ren
 
 /// Entry point for the acode terminal coding agent.
 ///
-/// Supports one-shot mode (`-p`) and an interactive REPL.
+/// Supports one-shot mode (`-p`), an interactive REPL, and the alternate-screen
+/// TUI (`--tui`).
 @main
 struct Acode: AsyncParsableCommand {
     @Option(name: .shortAndLong) var model: String?
@@ -73,6 +74,10 @@ struct Acode: AsyncParsableCommand {
     @Flag(name: .long) var yes: Bool = false
     @Option(name: .shortAndLong) var prompt: String?
     @Flag(name: .long) var verbose: Bool = false
+    /// Opt into the alternate-screen TUI. The default is the line-mode REPL
+    /// (and one-shot mode is unchanged). Non-TTY runs (pipes, CI) always
+    /// fall through to line mode regardless of this flag.
+    @Flag(name: .long) var tui: Bool = false
 
     /// The acode release version, surfaced in the startup banner.
     nonisolated static let version = "0.1.0"
@@ -93,6 +98,17 @@ struct Acode: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        // `--tui` (with no `-p` prompt) enters the alternate-screen TUI.
+        // The TUI is gated on a real TTY; pipes/CI always fall through to
+        // line mode (the TUI's raw-mode would just hang there).
+        if tui, prompt == nil {
+            let isTTY = isatty(STDIN_FILENO) != 0 && isatty(STDOUT_FILENO) != 0
+            if isTTY {
+                await Self.runTUISession(model: model, yes: yes, verbose: verbose, agents: agents)
+                return
+            }
+        }
+
         // No prompt: enter the interactive REPL.
         guard let prompt else {
             await Self.runREPL(model: model, yes: yes, verbose: verbose, agents: agents)
@@ -287,6 +303,121 @@ struct Acode: AsyncParsableCommand {
                 await runCancellable({ try await agent.run(text) }, renderer: renderer)
             }
         }
+    }
+
+    /// Boots the alternate-screen TUI.
+    ///
+    /// Wires the same building blocks `runREPL` does (config, tools, agent,
+    /// shared `ApprovalPolicy`) plus the TUI-specific pieces (the sink, the
+    /// command handler, the `Terminal` handle, the `Capabilities`). The
+    /// TUIApp loop owns the screen and the user input from there.
+    ///
+    /// Falls back to a helpful stderr message and exits cleanly if the
+    /// terminal refuses raw mode (very rare on a TTY; the only real-world
+    /// trigger is the user piping stdin to `--tui`, which `run()` already
+    /// guards against).
+    @MainActor
+    private static func runTUISession(model: String?, yes: Bool, verbose: Bool, agents: [String]) async {
+        let cfg = Config.load(verbose: verbose)
+        var tools = ToolRegistry()
+        registerStandardTools(&tools)
+        // The `set_tasks` tool is the only new registration the TUI adds.
+        // It is safe to always register (it has no side effects and is
+        // non-destructive — the model owns the list, the tool just echoes
+        // it back as JSON for the sink to parse).
+        tools.register(SetTasksTool())
+        let resolvedModel = model ?? cfg.defaultModel ?? defaultAnthropicModel
+        let provider = makeProvider(model: model, cfg: cfg)
+        let policy = ApprovalPolicy(
+            autoApproveAll: yes || (cfg.autoApprove ?? false),
+            alwaysAllowed: Set(cfg.autoApproveTools ?? []),
+            allowedShellPrefixes: cfg.autoApproveShell ?? []
+        )
+        if verbose {
+            FileHandle.standardError.write(Data("Model: \(resolvedModel)\nProvider: \(providerName(provider))\n".utf8))
+        }
+
+        // Open the terminal first so a failure (raw-mode denied, no TTY)
+        // doesn't leave dangling agent/sink objects behind. `Terminal` is
+        // its own exception path: it restores on `deinit`/`atexit`/signal.
+        let terminal: Terminal
+        do {
+            terminal = try Terminal()
+        } catch {
+            FileHandle.standardError.write(Data("error: --tui requires a real TTY (terminal init failed: \(error))\n".utf8))
+            return
+        }
+
+        // The TUI needs its own `TUISink` (the post target is wired up
+        // inside `TUIApp.run` after the AsyncStream is created). The sink
+        // must be constructed BEFORE the agent — `Agent.init` takes the
+        // sink by reference and starts posting into it on the first
+        // model event.
+        let sink = TUISink(approvalPolicy: policy)
+
+        // The shared model id has to be a `let` because the orchestrator
+        // closure captures it for a sending `@MainActor` (Swift 6.3 strict
+        // concurrency: capturing a `var` in a sending closure is rejected).
+        let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: sink)
+
+        // Pricing is read once at startup so the HUD's cost widget doesn't
+        // pay the table-lookup cost on every frame.
+        let pricing = PricingTable.pricing(for: resolvedModel)
+
+        // Detect terminal capabilities from env. Capabilities.detect is a
+        // pure function of the environment — it does NOT query the live
+        // terminal (deferred; the P1 spec says it reserves the handle).
+        let env = ProcessInfo.processInfo.environment
+        let caps = Capabilities.detect(env: env, term: terminal)
+
+        // Build the initial model. `Status` carries the model name, the
+        // cwd, and (best-effort) the active branch. The initial transcript
+        // starts with a `notice` so the user sees something other than an
+        // empty screen on first paint. We use a `var` here so the
+        // transcript is mutable.
+        let cwd = FileManager.default.currentDirectoryPath
+        let branch: String? = nil  // branch detection is TUI P4 polish
+        var initial = TUIModel(
+            status: Status(
+                model: resolvedModel,
+                cwd: cwd,
+                branch: branch,
+                contextWindow: provider.contextWindow
+            ),
+            startup: true
+        )
+        initial.transcript.append(.notice("acode \(version) — type /help for commands. Ctrl-C cancels a turn; Ctrl-D quits."))
+
+        // Construct the loop's main object. The init builds no I/O; the
+        // `run()` method wires the AsyncStream, the SIGWINCH source, and
+        // the read loop.
+        let tuiApp = TUIApp(
+            agent: agent,
+            sink: sink,
+            terminal: terminal,
+            model: initial,
+            caps: caps,
+            pricing: pricing
+        )
+
+        // Build the slash dispatcher. The closure captures `agent`,
+        // `resolvedModel`, `makeProvider` (as a `@MainActor` factory),
+        // `tools`, `sink`, and `policy`. The TUI app is set as the
+        // command handler's weak target for `/theme`.
+        let commandHandler = CommandHandler(
+            agent: agent,
+            resolvedModel: resolvedModel,
+            makeProvider: { makeProvider(model: $0, cfg: cfg) },
+            tools: tools,
+            sink: sink,
+            profiles: orchestratorProfiles(agents: agents, cfg: cfg),
+            policy: policy,
+            app: tuiApp
+        )
+        tuiApp.setCommandHandler(commandHandler)
+        tuiApp.setApprovalPolicy(policy)
+
+        await tuiApp.run()
     }
 
     /// Builds the runtime and runs one prompt. MainActor-isolated so the

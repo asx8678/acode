@@ -1,11 +1,33 @@
 import Foundation
-import AcodeCore
 
-// `Command` and `allCommands` moved to `AcodeCore/SlashCommand.swift`
-// during the Phase 1 restructure (so the lib's `CommandHandler` can
-// render `/help` without depending on the TUI's `Palette` module).
-// The TUI palette rendering + the fuzzy search stay in this file;
-// they consume `Command` + `allCommands` from the lib.
+// MARK: - Command / allCommands
+//
+// (Single-target build: `Command` and `allCommands` live here in the
+// palette file because the TUI palette is the only consumer. A future
+// restructure can move them to a dedicated `SlashCommand.swift` if a
+// second caller appears.)
+
+/// A slash command exposed to the user via the palette and the `/help`
+/// list. `name` includes the leading `/` (e.g. `/help`).
+struct Command: Sendable, Equatable, Hashable {
+    let name: String
+    /// One-line description shown in the palette and `/help`.
+    let blurb: String
+}
+
+/// The canonical slash-command list. Order is the order the palette and
+/// `/help` present them in (the palette re-sorts on a query via `fuzzy`).
+nonisolated let allCommands: [Command] = [
+    Command(name: "/help",      blurb: "show this help"),
+    Command(name: "/clear",     blurb: "clear conversation history"),
+    Command(name: "/quit",      blurb: "exit the TUI"),
+    Command(name: "/model",     blurb: "show or switch the active model"),
+    Command(name: "/plan",      blurb: "run multi-agent planner → coder → reviewer"),
+    Command(name: "/theme",     blurb: "switch palette (e.g. /theme dark)"),
+    Command(name: "/auto",      blurb: "show or toggle blanket auto-approve"),
+    Command(name: "/allow",     blurb: "add a shell prefix to the auto-allow list"),
+    Command(name: "/approvals", blurb: "show or persist the approval policy"),
+]
 
 // MARK: - fuzzy
 
@@ -15,7 +37,7 @@ import AcodeCore
 /// alphabetical. Empty query returns the full list in name order.
 ///
 /// **Pure**: no I/O, no `Date`, no side effects. Same input → same
-/// output, so the palette is verifiable by replay (TUI_PLAN §6).
+/// output, so the palette is verifiable by replay.
 nonisolated func fuzzy(_ query: String, _ all: [Command] = allCommands) -> [Command] {
     let q = query.lowercased()
     if q.isEmpty { return all }
