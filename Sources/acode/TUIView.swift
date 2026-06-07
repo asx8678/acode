@@ -152,7 +152,8 @@ func renderFrame(_ m: TUIModel, size: TermSize, theme: Theme, caps: Capabilities
 
     // 1. HUD: 1 row on wide terminals, 2 rows on narrow ones.
     let hudLines = renderHUD(
-        model: m, width: size.cols, theme: theme, depth: caps.color, now: now
+        model: m, width: size.cols, theme: theme, depth: caps.color, now: now,
+        graphics: caps.graphics
     )
     lines.append(contentsOf: hudLines)
 
@@ -307,12 +308,22 @@ func renderFrame(_ m: TUIModel, size: TermSize, theme: Theme, caps: Capabilities
 /// every field with a · separator; on narrow terminals we split into
 /// "primary" (model + gauge + tokens + tok/s) and "secondary"
 /// (cost + elapsed + pulse) rows.
+///
+/// `graphics` is the active terminal's inline-image protocol. When it
+/// is not `.none` and `m.metrics.samples` is non-empty, a sixel
+/// chart of the rolling tok/s window is appended to the right of the
+/// rate field in single-row mode, and to the end of the right row in
+/// double-row mode. The chart is a single escape sequence with
+/// display width 0, so the existing `displayWidth(stripAnsi(...))`
+/// width check is unaffected — the chart's rendered pixels overlay
+/// the cells that follow without shifting the text columns.
 private func renderHUD(
     model m: TUIModel,
     width: Int,
     theme: Theme,
     depth: ColorDepth,
-    now: Double
+    now: Double,
+    graphics: GraphicsProtocol
 ) -> [String] {
     let model = m.status.model
     let primary = badge("◆ \(shortenModel(model))", theme.accentA, depth: depth)
@@ -336,6 +347,20 @@ private func renderHUD(
     let tokOut = formatTokens(m.metrics.outTokens)
     let tokens = "\(sgr(theme.dim, depth))↑\(sgrReset())\(tokIn) \(sgr(theme.dim, depth))↓\(sgrReset())\(tokOut)"
     let rate = "\(sgr(theme.accentA, depth))\(sgrReset())\(m.metrics.tokPerSec(now: now)) tok/s"
+    // swift-92m.8 (Phase 2): inline sixel chart of the tok/s ring
+    // buffer. Width 16 matches the existing `sparkline` budget in
+    // TUIView.swift; height 3 = 1 visual HUD row (3 sixel bands ×
+    // 6 scanlines ≈ 18 px, the height of one terminal cell on the
+    // default macOS font). `chart` returns nil for `.none`, empty
+    // samples, or undersized dimensions — we silently fall back to
+    // the text-only HUD. Throttling lives in the caller (TUIModel's
+    // 2 FPS sample loop); `renderHUD` is pure and re-entrant.
+    let chartStr: String?
+    if graphics != .none, !m.metrics.samples.isEmpty {
+        chartStr = chart(m.metrics.samples, width: 16, height: 3, proto: graphics)
+    } else {
+        chartStr = nil
+    }
     let cost = renderCost(m.metrics.cost(PricingTable.pricing(for: model)), theme: theme, depth: depth)
     let elapsed = renderElapsed(m.metrics.firstDeltaAt, now: now, theme: theme, depth: depth)
     let pulse = pulse(m.activity != .idle, m.tick)
@@ -353,7 +378,13 @@ private func renderHUD(
     }
     var singleFields: [String] = [primary]
     if let branchBadge { singleFields.append(branchBadge) }
-    singleFields.append(contentsOf: [gaugeStr, tokens, rate, cost, elapsed, pulse])
+    // The chart sits immediately after the rate field — same column
+    // band, so it visually accompanies the `tok/s` number on the
+    // right side of the HUD. In single-row mode the cost/elapsed/
+    // pulse fields follow.
+    singleFields.append(contentsOf: [gaugeStr, tokens, rate])
+    if let chartStr { singleFields.append(chartStr) }
+    singleFields.append(contentsOf: [cost, elapsed, pulse])
     let single = singleFields
         .joined(separator: " \(sgr(theme.dim, depth))·\(sgrReset()) ")
 
@@ -362,13 +393,19 @@ private func renderHUD(
     }
     // Two-row fallback: split at the cost field. The branch badge
     // rides on the *primary* (left) row so the user always sees
-    // it on wide terminals and the narrow-terminal fallback.
+    // it on wide terminals and the narrow-terminal fallback. The
+    // chart moves to the right row so it doesn't get clipped
+    // against the gauge — its 18 px height (3 bands) is the same
+    // shape as the right row's text cells and the layout reads
+    // better when the chart isn't fighting the gauge.
     var leftFields: [String] = [primary]
     if let branchBadge { leftFields.append(branchBadge) }
     leftFields.append(contentsOf: [gaugeStr, tokens, rate])
     let left = leftFields
         .joined(separator: " \(sgr(theme.dim, depth))·\(sgrReset()) ")
-    let right = [cost, elapsed, pulse]
+    var rightFields: [String] = [cost, elapsed, pulse]
+    if let chartStr { rightFields.append(chartStr) }
+    let right = rightFields
         .joined(separator: " \(sgr(theme.dim, depth))·\(sgrReset()) ")
     return [
         padOrClip(left, to: width, theme: theme, depth: depth),
