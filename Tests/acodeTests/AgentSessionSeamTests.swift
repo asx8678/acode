@@ -5,7 +5,7 @@ import Testing
 // MARK: - Agent seam (Step 0: history getter + restore writer)
 
 @MainActor
-@Test func test_agent_history_round_trip() {
+@Test func test_agent_history_round_trip() async throws {
     // A round-trip: agent.run() → reads back via `history` →
     // restores via `restore(_:)` → reads back via `history` again
     // must yield the same messages. This is the foundational
@@ -53,12 +53,12 @@ import Testing
     #expect(freshAgent.history.messages.isEmpty)
 
     freshAgent.restore(agent.history)
-    #expect(freshAgent.history.messages == agent.history)
+    #expect(freshAgent.history.messages == agent.history.messages)
     #expect(freshAgent.history.messages.count == 2)
 }
 
 @MainActor
-@Test func test_agent_restore_replaces_previous_history() {
+@Test func test_agent_restore_replaces_previous_history() async throws {
     // `restore(_:)` is a *replacement*, not an append. After
     // restoring, the agent's history is the new one — the old
     // messages must be gone. This is the contract the `/resume`
@@ -91,7 +91,7 @@ import Testing
 }
 
 @MainActor
-@Test func test_agent_history_is_value_typed() {
+@Test func test_agent_history_is_value_typed() async throws {
     // `history` returns a value copy, not a live alias. Mutating
     // the returned value must not affect the agent's internal
     // state — callers (the JSON encoder for `/save`) need that
@@ -121,7 +121,7 @@ import Testing
 // MARK: - /save → /resume cycle through a real SessionStore
 
 @MainActor
-@Test func test_save_resume_cycle_preserves_b2_pairing() {
+@Test func test_save_resume_cycle_preserves_b2_pairing() async throws {
     // The B2 invariant: every assistant tool_use is followed by
     // a matching .toolResults, and vice versa. A `/save` →
     // `/resume` cycle through the disk store must preserve this
@@ -196,20 +196,26 @@ import Testing
     agent.restore(loaded.conversation)
     _ = try? await agent.run("next turn")
 
-    // Provider saw the loaded 4 messages, then the new turn's
-    // user + assistant = 6 total.
-    #expect(provider.capturedMessages.count == 6)
-    // The first 4 are the loaded ones.
-    #expect(provider.capturedMessages[0...3] == loaded.conversation.messages)
-    // The last 2 are the new turn.
+    // Provider saw the loaded 4 messages + the new turn's user
+    // message that `Agent.run` appends before the first stream
+    // call. The new assistant turn is appended to the agent's
+    // conversation AFTER the stream call returns, so it's not in
+    // the captured set — the script is one-shot and the agent
+    // returns on the first iteration.
+    //
+    // The agent's stream() call is the single source of truth
+    // for what the provider actually saw: the loaded 4
+    // messages were sent verbatim (B2 intact) and the new
+    // "next turn" user was appended on top.
+    #expect(provider.capturedMessages.count == 5)
+    // The first 4 are the loaded ones. Wrap the slice in `Array(...)`
+    // so the comparison targets `[Message]` (the slice's
+    // `ArraySlice<Message>` doesn't match `[Message]`'s `==`).
+    #expect(Array(provider.capturedMessages[0...3]) == loaded.conversation.messages)
+    // The 5th is the new "next turn" user message.
     guard case .user(let newUser) = provider.capturedMessages[4] else {
         Issue.record("Expected new .user at index 4")
         return
     }
     #expect(newUser == "next turn")
-    guard case .assistant(let newAssistant, _) = provider.capturedMessages[5] else {
-        Issue.record("Expected new .assistant at index 5")
-        return
-    }
-    #expect(newAssistant == "ack")
 }
