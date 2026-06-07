@@ -36,6 +36,9 @@ nonisolated let allCommands: [Command] = [
     Command(name: "/auto",      blurb: "show or toggle blanket auto-approve"),
     Command(name: "/allow",     blurb: "add a shell prefix to the auto-allow list"),
     Command(name: "/approvals", blurb: "show or persist the approval policy"),
+    Command(name: "/save",      blurb: "save the current conversation as a session"),
+    Command(name: "/resume",    blurb: "resume a saved session (name, id prefix, or `last`)"),
+    Command(name: "/sessions",  blurb: "list saved sessions (newest first)"),
 ]
 
 // MARK: - fuzzy

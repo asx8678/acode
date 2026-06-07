@@ -58,6 +58,15 @@ final class TUIApp {
     private let keyDecoder = SafeKeyDecoder()
 
     // MARK: - Concurrency
+    /// Off-loop post target. `CommandHandler.replaceTranscript`
+    /// (and any future loop-bypass posts) call this closure to
+    /// push a `Msg` into the MVU stream without going through
+    /// the reducer. Wired in `run()` (where the continuation
+    /// exists in scope) and nil'd at loop exit. Same pattern as
+    /// `sink.setPost` — the AsyncStream plumbing is owned by the
+    /// loop, and the rest of the system gets a Sendable closure
+    /// to reach it.
+    private var postMsg: ((Msg) -> Void)?
     private var sigwinchSource: DispatchSourceSignal?
     private var frameTimerTask: Task<Void, Never>?
     private var turnTask: Task<Void, Never>?
@@ -149,6 +158,25 @@ final class TUIApp {
         diffCacheClear()
     }
 
+    /// Replaces the live transcript with `items` (typically built
+    /// from a resumed `Conversation` via `transcriptItems(from:)`)
+    /// and, when non-nil, realigns the displayed model id. Used by
+    /// the `/resume` slash path and by `--resume`/`--continue`
+    /// startup so the user sees the loaded history scroll back
+    /// into view. Posts a `Msg.replaceTranscript` to the loop's
+    /// stream; the reducer is the only thing that mutates the
+    /// model.
+    ///
+    /// Safe to call from `CommandHandler` (`@MainActor`) — both
+    /// are on the main actor, so the closure invocation is
+    /// race-free. If `run()` hasn't been entered yet (e.g. a
+    /// pre-loop `/resume` boot path), `postMsg` is nil and the
+    /// post is silently dropped; the pre-loop caller doesn't
+    /// need this method anyway (it can build `TUIModel` directly).
+    func replaceTranscript(_ items: [TranscriptItem], model: String? = nil) {
+        postMsg?(.replaceTranscript(items, model: model))
+    }
+
     /// The currently-active theme. Exposed for the loop to print
     /// "current theme: …" on `/theme` with no arg.
     var currentTheme: Theme { theme }
@@ -176,6 +204,13 @@ final class TUIApp {
         // event could fire. The sink's post is silent until this is
         // set; if we forget, agent events would be lost.
         sink.setPost { msg in continuation.yield(msg) }
+        // Same plumbing for the loop-bypass post target
+        // (`CommandHandler.replaceTranscript`, future
+        // `Msg`-only-from-the-loop handlers). `Sendable` because
+        // the continuation itself is Sendable. The closure is
+        // overwritten on every `run()` so a second entry into
+        // the loop gets a fresh, valid handle.
+        self.postMsg = { msg in continuation.yield(msg) }
 
         // 1. Byte → key. The read loop is a detached task per
         // `Terminal.readLoop`; we adapt its byte sink into Msg posts.
@@ -266,6 +301,7 @@ final class TUIApp {
 
         // 5. Cleanup.
         continuation.finish()
+        postMsg = nil
         sigwinch.cancel()
         frameTimerTask?.cancel()
         turnTask?.cancel()

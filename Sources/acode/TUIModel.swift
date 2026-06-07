@@ -269,6 +269,13 @@ enum Msg: Sendable {
     /// immediately on a fast-path update. The reducer is a
     /// pure assignment; the next frame picks up the new value.
     case branchRefresh(String?)
+    /// Replaces the live transcript with a freshly-built set of
+    /// items (typically derived from a resumed `Conversation`) and,
+    /// optionally, updates the displayed model id. Posted by
+    /// `TUIApp.replaceTranscript` from the `/resume` slash path
+    /// (and from `--resume`/`--continue` startup). The reducer is
+    /// a pure assignment; the next frame paints the new history.
+    case replaceTranscript([TranscriptItem], model: String?)
 }
 
 // MARK: - Effect
@@ -420,6 +427,26 @@ func update(_ m: inout TUIModel, _ msg: Msg) -> [Effect] {
         // posts the new value. Pure assignment — the next
         // `renderFrame` paints the updated HUD / wordmark.
         m.status.branch = branch
+        return []
+
+    case .replaceTranscript(let items, let model):
+        // swift-be0.3: `/resume` and `--resume`/`--continue` land
+        // here. Replace the visible transcript with the items
+        // built from a loaded `Conversation` (so the user can
+        // scroll back through the resumed history) and reset the
+        // per-turn chrome that should NOT carry over (pending
+        // approvals, in-flight orchestrator timeline, scroll pin).
+        // A loaded session with a saved model also re-aligns the
+        // status model id (and therefore the HUD/wordmark).
+        m.transcript = items
+        m.activity = .idle
+        m.pendingApproval = nil
+        m.phases = []
+        m.phaseRound = 0
+        m.scroll = 0
+        if let model = model { m.status.model = model }
+        // Dismiss the startup wordmark; the user is mid-session.
+        m.startup = false
         return []
 
     case .usage(let u):
@@ -777,6 +804,86 @@ extension ToolView {
     private static func truncate(_ s: String, to n: Int) -> String {
         s.count <= n ? s : String(s.prefix(n - 1)) + "…"
     }
+}
+
+// MARK: - Conversation → transcript rebuild (swift-be0.3)
+//
+// `Agent.history` is the source of truth for a resumed session; the
+// TUI's visible transcript is a separate model. To make `/resume`
+// (and `--resume`/`--continue` startup) actually useful we rebuild
+// the transcript from the loaded `Conversation` so the user can
+// scroll back through what happened. The mapping is lossy by
+// design — phases/notices/errors are not persisted — but covers
+// everything the user actually wrote or the model produced.
+
+/// Maps a `Conversation` to a flat `[TranscriptItem]` suitable for
+/// `TUIApp.replaceTranscript`. Pure, value-typed, dependency-free
+/// (no terminal/theme/etc.) so it can be unit-tested against an
+/// arbitrary `Conversation` and reused by the `--resume` boot path
+/// without driving the MVU loop.
+///
+/// Mapping rules:
+/// - `.user(text)` → `.user(text)`
+/// - `.assistant(text, toolCalls)` →
+///   - if `text` non-empty, a `.assistant(text)` row first
+///   - then one `.tool(ToolView)` row per tool call (initially
+///     `.running`; subsequent `.toolResults` will fill in the
+///     output and flip the status to `.ok`/`.error`)
+/// - `.toolResults(results)` → fills the most recent still-`.running`
+///   tool row(s) with `output` and `status`. Extra results beyond
+///   the running set (defensive — should not happen in well-formed
+///   data) are dropped.
+func transcriptItems(from conversation: Conversation) -> [TranscriptItem] {
+    var items: [TranscriptItem] = []
+    for message in conversation.messages {
+        switch message {
+        case .user(let text):
+            items.append(.user(text))
+
+        case .assistant(let text, let toolCalls):
+            // Skip wholly-empty assistant rows the same way the live
+            // reducer would (see Agent.run: an empty assistant
+            // message is never persisted to history). A loaded
+            // session that was hand-edited with one is rendered as
+            // a single space so the user sees a placeholder rather
+            // than a missing turn.
+            if !text.isEmpty {
+                items.append(.assistant(text: text))
+            }
+            for call in toolCalls {
+                items.append(.tool(ToolView(
+                    name: call.name,
+                    summary: ToolView.summary(for: call),
+                    output: "",
+                    status: .running,
+                    expanded: false,
+                    startedAt: nil,
+                    endedAt: nil
+                )))
+            }
+
+        case .toolResults(let results):
+            // Fill in the most recent still-running tool row per
+            // result. We match in arrival order against the most
+            // recent unmatched running row, which preserves B2
+            // pairing when the saved conversation is well-formed.
+            for result in results {
+                if let idx = items.lastIndex(where: {
+                    if case .tool(let tv) = $0, tv.status == .running {
+                        return true
+                    }
+                    return false
+                }) {
+                    if case .tool(var tv) = items[idx] {
+                        tv.output = result.output
+                        tv.status = result.isError ? .error : .ok
+                        items[idx] = .tool(tv)
+                    }
+                }
+            }
+        }
+    }
+    return items
 }
 
 // MARK: - Phase → task mapping (U3.3)

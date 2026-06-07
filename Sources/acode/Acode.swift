@@ -164,7 +164,12 @@ struct Acode: AsyncParsableCommand {
     /// The interactive read-eval-print loop. Slash and shell commands work
     /// without an API key; only model turns require one.
     @MainActor
-    private static func runREPL(model: String?, yes: Bool, verbose: Bool, agents: [String]) async {
+    private static func runREPL(
+        model: String?,
+        yes: Bool,
+        verbose: Bool,
+        agents: [String]
+    ) async {
         print("acode \(version)")
 
         let cfg = Config.load(verbose: verbose)
@@ -185,6 +190,14 @@ struct Acode: AsyncParsableCommand {
         renderer.verboseLog("Model: \(resolvedModel)")
         renderer.verboseLog("Provider: \(providerName(provider))")
         let agent = Agent(profile: .generalist, provider: provider, tools: tools, renderer: renderer)
+        // swift-be0.3: session persistence. `currentSession` is the
+        // in-place update target for `/save` and the auto-save on
+        // `/quit`; nil until the first save or until `--resume` /
+        // `--continue` seeds it. `sessionStore` is the on-disk
+        // backend (`~/.config/acode/sessions` by default; can be
+        // overridden via the testable init).
+        let sessionStore = SessionStore.default
+        var currentSession: Session? = nil
 
         loop: while true {
             print("> ", terminator: "")
@@ -200,14 +213,62 @@ struct Acode: AsyncParsableCommand {
             case .slash(let command):
                 switch command {
                 case "help":
-                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>, /auto [on|off], /allow <cmd>, /approvals [save]. Prefix ! to run a shell command; anything else is a task.")
+                    print("Commands: /help, /clear, /quit, /model [name], /plan <task>, /auto [on|off], /allow <cmd>, /approvals [save], /save [name], /resume [name|last], /sessions. Prefix ! to run a shell command; anything else is a task.")
                 case "clear":
                     agent.reset()
                     print("Conversation history cleared.")
+                case "sessions":
+                    Self.handleLineModeSessionsList(sessionStore: sessionStore)
                 case "quit":
+                    // swift-be0.3: auto-save the live history (or
+                    // the loaded session) before exiting. The save
+                    // and quit are not atomic, but `SessionStore.save`
+                    // uses an atomic write under the hood, so a
+                    // crash between the save and the break just
+                    // leaves the user with a slightly stale file.
+                    if !agent.history.messages.isEmpty {
+                        Self.handleLineModeSave(
+                            args: currentSession?.title ?? "",
+                            agent: agent,
+                            sessionStore: sessionStore,
+                            resolvedModel: resolvedModel,
+                            currentSession: &currentSession
+                        )
+                    }
                     break loop
                 default:
-                    if command == "plan" || command.hasPrefix("plan ") {
+                    // Verb-with-argument verbs (`save`, `resume`)
+                    // match both `verb` and `verb <args>`. The bare
+                    // forms were already handled above; here we
+                    // catch the argful form. Same pattern as the
+                    // other verb-with-arg slash commands
+                    // (`/plan`, `/auto`, `/allow`, `/approvals`).
+                    if command == "save" || command.hasPrefix("save ") {
+                        let args = command == "save"
+                            ? ""
+                            : String(command.dropFirst("save".count))
+                                .trimmingCharacters(in: .whitespaces)
+                        Self.handleLineModeSave(
+                            args: args,
+                            agent: agent,
+                            sessionStore: sessionStore,
+                            resolvedModel: resolvedModel,
+                            currentSession: &currentSession
+                        )
+                    } else if command == "resume" || command.hasPrefix("resume ") {
+                        let args = command == "resume"
+                            ? ""
+                            : String(command.dropFirst("resume".count))
+                                .trimmingCharacters(in: .whitespaces)
+                        await Self.handleLineModeResume(
+                            args: args,
+                            agent: agent,
+                            sessionStore: sessionStore,
+                            cfg: cfg,
+                            resolvedModel: &resolvedModel,
+                            currentSession: &currentSession
+                        )
+                    } else if command == "plan" || command.hasPrefix("plan ") {
                         let task = command.dropFirst("plan".count).trimmingCharacters(in: .whitespaces)
                         if task.isEmpty {
                             print("Usage: /plan <task description>")
@@ -305,6 +366,128 @@ struct Acode: AsyncParsableCommand {
         }
     }
 
+    // MARK: - Line-mode session commands (swift-be0.3)
+    //
+    // The TUI equivalents live on `CommandHandler`; these are
+    // the line-mode versions. Shared logic (title derivation,
+    // id-prefix resolution) lives in `SessionResolve.swift` so
+    // both surfaces resolve the same way.
+
+    /// `/save [name]` (and the auto-save on `/quit`).
+    /// `args` is the trimmed trailing argument (everything after
+    /// `save` in the slash verb); empty means "derive a title".
+    /// On success, sets `currentSession` to the saved session so
+    /// subsequent `/save` calls update the same file in place.
+    @MainActor
+    private static func handleLineModeSave(
+        args: String,
+        agent: Agent,
+        sessionStore: SessionStore,
+        resolvedModel: String,
+        currentSession: inout Session?
+    ) {
+        let nameArg: String? = args.isEmpty ? nil : args
+        let history = agent.history
+        let title = nameArg ?? deriveSessionTitle(from: history)
+        let now = Date()
+        let session: Session
+        if var existing = currentSession {
+            existing.conversation = history
+            existing.updatedAt = now
+            if let nameArg = nameArg { existing.title = nameArg }
+            session = existing
+        } else {
+            var fresh = Session.new(title: title, model: resolvedModel)
+            fresh.conversation = history
+            fresh.updatedAt = now
+            session = fresh
+        }
+        if sessionStore.save(session) {
+            currentSession = session
+            let shortID = String(session.id.prefix(8))
+            print("Saved session \(shortID): \(session.title ?? "(untitled)") — \(session.conversation.messages.count) messages.")
+        } else {
+            print("Error: failed to save session to \(sessionStore.baseDir.path).")
+        }
+    }
+
+    /// `/resume [name|last]`. Resolves the target session, calls
+    /// `agent.restore(...)`, and (if the session has a saved
+    /// model) realigns the active model by calling
+    /// `makeProvider` + `agent.switchProvider` and updating
+    /// `resolvedModel`. The local `provider` is left alone —
+    /// `/model` already follows the same pattern (it updates
+    /// the agent + the local `resolvedModel`, not the captured
+    /// `provider` const used by `/plan`).
+    @MainActor
+    private static func handleLineModeResume(
+        args: String,
+        agent: Agent,
+        sessionStore: SessionStore,
+        cfg: Config,
+        resolvedModel: inout String,
+        currentSession: inout Session?
+    ) async {
+        let trimmed = args.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            print("Usage: /resume <name|id-prefix|last>")
+            return
+        }
+        let resolution: SessionResolution
+        if trimmed.lowercased() == "last" {
+            if let recent = sessionStore.mostRecent() {
+                resolution = .found(recent)
+            } else {
+                print("No saved sessions to resume. Use /save to create one.")
+                return
+            }
+        } else {
+            resolution = resolveSession(idOrPrefix: trimmed, store: sessionStore)
+        }
+        switch resolution {
+        case .notFound:
+            print("No session matched \"\(trimmed)\". Try /sessions to list.")
+        case .ambiguous(let matches):
+            let heads = matches.prefix(3).map { String($0.id.prefix(8)) }
+            let more = matches.count > 3 ? " (and \(matches.count - 3) more)" : ""
+            print("Ambiguous: \"\(trimmed)\" matched \(matches.count) sessions: \(heads.joined(separator: ", "))\(more). Use a longer prefix or /sessions.")
+        case .found(let session):
+            agent.restore(session.conversation)
+            if let savedModel = session.model, savedModel != resolvedModel {
+                let newProvider = makeProvider(model: savedModel, cfg: cfg)
+                agent.switchProvider(newProvider)
+                resolvedModel = savedModel
+                print("Model switched to \(savedModel).")
+            }
+            currentSession = session
+            let shortID = String(session.id.prefix(8))
+            let count = session.conversation.messages.count
+            print("Resumed \(shortID): \(session.title ?? "(untitled)") — \(count) messages.")
+        }
+    }
+
+    /// `/sessions`. Compact one-line-per-session listing,
+    /// newest first. Mirrors the TUI's `/sessions` notice.
+    @MainActor
+    private static func handleLineModeSessionsList(sessionStore: SessionStore) {
+        let sessions = sessionStore.list()
+        guard !sessions.isEmpty else {
+            print("No saved sessions. Use /save to create one.")
+            return
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withColonSeparatorInTime]
+        print("Saved sessions (newest first):")
+        for s in sessions {
+            let shortID = String(s.id.prefix(8))
+            let title = s.title ?? "(untitled)"
+            let model = s.model ?? "—"
+            let count = s.conversation.messages.count
+            let date = formatter.string(from: s.updatedAt)
+            print("  \(shortID)  \(title)  [\(model)]  \(count) msg  \(date)")
+        }
+    }
+
     /// Boots the alternate-screen TUI.
     ///
     /// Wires the same building blocks `runREPL` does (config, tools, agent,
@@ -317,7 +500,12 @@ struct Acode: AsyncParsableCommand {
     /// trigger is the user piping stdin to `--tui`, which `run()` already
     /// guards against).
     @MainActor
-    private static func runTUISession(model: String?, yes: Bool, verbose: Bool, agents: [String]) async {
+    private static func runTUISession(
+        model: String?,
+        yes: Bool,
+        verbose: Bool,
+        agents: [String]
+    ) async {
         let cfg = Config.load(verbose: verbose)
         var tools = ToolRegistry()
         registerStandardTools(&tools)
@@ -409,6 +597,12 @@ struct Acode: AsyncParsableCommand {
         // `resolvedModel`, `makeProvider` (as a `@MainActor` factory),
         // `tools`, `sink`, and `policy`. The TUI app is set as the
         // command handler's weak target for `/theme`.
+        //
+        // swift-be0.3: thread the session store so `/save`,
+        // `/resume`, `/sessions`, and auto-save on `/quit` all
+        // work in the TUI. `currentSession` defaults to nil; it
+        // is set by an in-loop `/resume` (see
+        // `CommandHandler.handleResume`).
         let commandHandler = CommandHandler(
             agent: agent,
             resolvedModel: resolvedModel,
@@ -417,7 +611,8 @@ struct Acode: AsyncParsableCommand {
             sink: sink,
             profiles: orchestratorProfiles(agents: agents, cfg: cfg),
             policy: policy,
-            app: tuiApp
+            app: tuiApp,
+            sessionStore: SessionStore.default
         )
         tuiApp.setCommandHandler(commandHandler)
         tuiApp.setApprovalPolicy(policy)

@@ -57,6 +57,15 @@ final class CommandHandler {
     /// The TUI app — `/theme` calls `setTheme` so the next frame picks up
     /// the new palette without bouncing through the model.
     private weak var app: TUIApp?
+    /// The session store for `/save`, `/resume`, `/sessions`, and
+    /// auto-save on `/quit`. Injected so the dispatch path stays
+    /// network-free; production wires the default store, tests can
+    /// point at a temp dir.
+    private let sessionStore: SessionStore
+    /// The currently-loaded session, if any. Set by `/resume` (and
+    /// by `--resume`/`--continue` startup). Used as the in-place
+    /// update target for `/save` and the auto-save on `/quit`.
+    private var currentSession: Session?
 
     init(
         agent: Agent,
@@ -66,7 +75,9 @@ final class CommandHandler {
         sink: TUISink,
         profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile),
         policy: ApprovalPolicy,
-        app: TUIApp
+        app: TUIApp,
+        sessionStore: SessionStore = SessionStore.default,
+        currentSession: Session? = nil
     ) {
         self.agent = agent
         self.resolvedModel = resolvedModel
@@ -76,6 +87,8 @@ final class CommandHandler {
         self.profiles = profiles
         self.policy = policy
         self.app = app
+        self.sessionStore = sessionStore
+        self.currentSession = currentSession
     }
 
     // MARK: - Sync slash dispatch
@@ -99,9 +112,6 @@ final class CommandHandler {
                 notice: Self.helpText,
                 message: nil
             )
-
-        case "quit", "q", "exit":
-            return SlashResult(quit: true)
 
         case "clear":
             agent.reset()
@@ -196,6 +206,15 @@ final class CommandHandler {
                 )
             }
 
+        case "save":
+            return handleSave(args: args)
+
+        case "resume":
+            return handleResume(args: args)
+
+        case "sessions":
+            return handleSessionsList()
+
         case "plan":
             // The orchestrator is async; the loop dispatches the actual
             // turn on a child task AFTER `run(slashCommand:)` returns
@@ -212,9 +231,208 @@ final class CommandHandler {
             }
             return SlashResult()
 
+        case "quit", "q", "exit":
+            // Auto-save current session (or the live history, if no
+            // session is loaded) before the loop exits. Mirrors
+            // line-mode `Acode.swift:runREPL` (see the /quit branch
+            // there). The actual break is owned by the loop on
+            // `result.quit == true`; this branch just returns the
+            // right SlashResult. The auto-save runs here so the
+            // /quit notice accurately reports the save outcome.
+            return handleQuit()
+
         default:
             return SlashResult(notice: "Unknown command: /\(verb). Type /help.", message: nil)
         }
+    }
+
+    // MARK: - Session commands (swift-be0.3)
+
+    /// Handles `/save [name]`. Builds a `Session` from the current
+    /// `agent.history` (verbatim — no compaction) and the
+    /// `resolvedModel`, then saves it to the store. If a session
+    /// is already loaded (`currentSession != nil`), update it
+    /// in place; otherwise create a new one. The name (if
+    /// given) replaces the existing title; otherwise the title
+    /// is derived from the first user message (or a timestamp).
+    private func handleSave(args: String) -> SlashResult {
+        let trimmed = args.trimmingCharacters(in: .whitespaces)
+        let nameArg = trimmed.isEmpty ? nil : trimmed
+
+        let history = agent.history
+        let title = nameArg ?? deriveSessionTitle(from: history)
+        let now = Date()
+
+        let session: Session
+        if var existing = currentSession {
+            // Update in place: replace conversation, bump updatedAt,
+            // and overwrite the title if the user named it explicitly.
+            existing.conversation = history
+            existing.updatedAt = now
+            if let nameArg = nameArg { existing.title = nameArg }
+            session = existing
+        } else {
+            // Fresh session: stamp the model at the moment of save.
+            // Build the empty shell, then overwrite the conversation
+            // (and the title — the user might have passed a name
+            // overriding the derivation) and updatedAt.
+            var fresh = Session.new(title: title, model: resolvedModel)
+            fresh.conversation = history
+            fresh.updatedAt = now
+            session = fresh
+        }
+
+        if sessionStore.save(session) {
+            currentSession = session
+            let shortID = String(session.id.prefix(8))
+            return SlashResult(
+                notice: "Saved session \(shortID): \(session.title ?? "(untitled)") — \(session.conversation.messages.count) messages.",
+                message: "Session saved"
+            )
+        } else {
+            return SlashResult(
+                notice: "Error: failed to save session to \(sessionStore.baseDir.path).",
+                message: nil
+            )
+        }
+    }
+
+    /// Handles `/resume [name|last]`. Resolves the target session
+    /// (exact id, id prefix, exact title, or title prefix; `last`
+    /// short-circuits to the newest session), restores it into
+    /// the agent, rebuilds the visible transcript, and (if the
+    /// session has a saved model) realigns the active model. The
+    /// full history is the source of truth — the user can scroll
+    /// back through every loaded turn.
+    private func handleResume(args: String) -> SlashResult {
+        let trimmed = args.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            return SlashResult(
+                notice: "Usage: /resume <name|id-prefix|last>",
+                message: nil
+            )
+        }
+
+        // `last` short-circuits the resolution table — this is the
+        // documented one-word shortcut for the most recent session.
+        let resolution: SessionResolution
+        if trimmed.lowercased() == "last" {
+            if let recent = sessionStore.mostRecent() {
+                resolution = .found(recent)
+            } else {
+                return SlashResult(
+                    notice: "No saved sessions to resume. Use /save to create one.",
+                    message: nil
+                )
+            }
+        } else {
+            resolution = resolveSession(idOrPrefix: trimmed, store: sessionStore)
+        }
+
+        switch resolution {
+        case .notFound:
+            return SlashResult(
+                notice: "No session matched \"\(trimmed)\". Try /sessions to list.",
+                message: nil
+            )
+
+        case .ambiguous(let matches):
+            // Disambiguate by id prefix. Listing them in the
+            // transcript is too noisy; cap at 3 and add a hint
+            // pointing the user at /sessions.
+            let heads = matches.prefix(3).map { String($0.id.prefix(8)) }
+            let more = matches.count > 3 ? " (and \(matches.count - 3) more)" : ""
+            return SlashResult(
+                notice: "Ambiguous: \"\(trimmed)\" matched \(matches.count) sessions: \(heads.joined(separator: ", "))\(more). Use a longer prefix or /sessions.",
+                message: nil
+            )
+
+        case .found(let session):
+            // Apply the seam: restore history on the agent, realign
+            // the model (if the session has one), and rebuild the
+            // visible transcript from the loaded conversation.
+            // Mirrors the line-mode `Acode.runREPL` /resume branch
+            // so the two surfaces stay in parity.
+            agent.restore(session.conversation)
+            let items = transcriptItems(from: session.conversation)
+            var newModel: String? = nil
+            if let savedModel = session.model, savedModel != resolvedModel {
+                let newProvider = makeProvider(savedModel)
+                agent.switchProvider(newProvider)
+                resolvedModel = savedModel
+                newModel = savedModel
+            }
+            // Update the status model id (HUD/wordmark) so the user
+            // can see the switch landing in the chrome.
+            app?.replaceTranscript(items, model: newModel)
+            currentSession = session
+
+            let shortID = String(session.id.prefix(8))
+            let count = session.conversation.messages.count
+            return SlashResult(
+                notice: "Resumed \(shortID): \(session.title ?? "(untitled)") — \(count) messages.",
+                message: "Session resumed"
+            )
+        }
+    }
+
+    /// Handles `/sessions`. Prints a compact table of every
+    /// session in the store, sorted newest first. Empty store
+    /// gets a "No saved sessions" notice (a toast would imply
+    /// success on an empty result, which is the wrong tone for
+    /// a list command).
+    private func handleSessionsList() -> SlashResult {
+        let sessions = sessionStore.list()
+        guard !sessions.isEmpty else {
+            return SlashResult(
+                notice: "No saved sessions. Use /save to create one.",
+                message: nil
+            )
+        }
+        var lines: [String] = ["Saved sessions (newest first):"]
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withColonSeparatorInTime]
+        for s in sessions {
+            let shortID = String(s.id.prefix(8))
+            let title = s.title ?? "(untitled)"
+            let model = s.model ?? "—"
+            let count = s.conversation.messages.count
+            let date = formatter.string(from: s.updatedAt)
+            lines.append("  \(shortID)  \(title)  [\(model)]  \(count) msg  \(date)")
+        }
+        return SlashResult(
+            notice: lines.joined(separator: "\n"),
+            message: nil
+        )
+    }
+
+    /// Handles `/quit`. Auto-saves the live history (or updates
+    /// the loaded session in place) before the loop exits, then
+    /// returns `quit: true` so the loop breaks on its next tick.
+    /// Mirrors line-mode `Acode.runREPL` (see /quit branch).
+    private func handleQuit() -> SlashResult {
+        // Auto-save. If we have a current session, update it; if
+        // the history is non-empty, create one. Empty history
+        // means there is nothing to save and we just quit.
+        let history = agent.history
+        let hasHistory = !history.messages.isEmpty
+        if hasHistory {
+            // Re-use the save path so the title derivation,
+            // store call, and currentSession update all run
+            // through the same code as `/save`. Pass the
+            // existing title if we have one (don't overwrite
+            // it just because /quit fired).
+            let args = (currentSession?.title ?? "")
+            let saveResult = handleSave(args: args)
+            if let notice = saveResult.notice {
+                return SlashResult(
+                    notice: notice + "\nQuitting.",
+                    message: saveResult.message,
+                    quit: true
+                )
+            }
+        }
+        return SlashResult(quit: true)
     }
 
     // MARK: - Orchestrator
@@ -253,13 +471,16 @@ final class CommandHandler {
     Commands:
       /help              show this help
       /clear             clear conversation history
-      /quit              exit the TUI
+      /quit              exit the TUI (auto-saves if there's history)
       /model [name]      show or switch the active model
       /plan <task>       run the multi-agent planner → coder → reviewer
       /theme <name>      switch palette (e.g. /theme dark)
       /auto [on|off]     show or toggle blanket auto-approve
       /allow <prefix>    add a shell command prefix to the auto-allow list
       /approvals [save]  show or persist the approval policy
+      /save [name]       save the current conversation as a session
+      /resume [name|last] resume a saved session (name, id prefix, or `last`)
+      /sessions          list saved sessions (newest first)
 
     Aliases: /h, /? → /help · /q, /exit → /quit
 

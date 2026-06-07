@@ -111,6 +111,31 @@ final class Agent {
         conversation = Conversation()
     }
 
+    /// Read-only snapshot of the live conversation history. Used by
+    /// the session-persistence surface (`/save`, `--resume`,
+    /// one-shot continuation) to serialize the in-flight turn
+    /// without going through compaction. The returned value is a
+    /// value-type copy (`Conversation` is a struct), so callers can
+    /// encode it without aliasing the agent's internal state.
+    ///
+    /// swift-be0.3: this getter is the read side of the seam; see
+    /// `restore(_:)` for the write side.
+    var history: Conversation { conversation }
+
+    /// Seeds the agent's conversation with a previously-saved one.
+    /// Used by `/resume`, `--resume`, and `--continue` to restore
+    /// history on top of a fresh agent (so the next `run` call sees
+    /// the loaded messages verbatim — no compaction, no truncation,
+    /// preserves invariant B2). The provider is *not* changed by
+    /// this call; callers that want the session's saved model
+    /// alignment should follow up with `switchProvider` (or
+    /// `/model` in the REPL).
+    ///
+    /// swift-be0.3: write side of the seam. Pair with `history`.
+    func restore(_ conversation: Conversation) {
+        self.conversation = conversation
+    }
+
     @discardableResult
     func run(_ input: String) async throws -> String {
         conversation.append(.user(input))
