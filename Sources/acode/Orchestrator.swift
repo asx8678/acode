@@ -66,7 +66,16 @@ struct Orchestrator {
         tools: ToolRegistry,
         renderer: any RenderSink,
         profiles: (planner: AgentProfile, coder: AgentProfile, reviewer: AgentProfile) = (.planner, .coder, .reviewer),
-        providerForProfile: (@MainActor (AgentProfile) -> any LLMProvider)? = nil
+        providerForProfile: (@MainActor (AgentProfile) -> any LLMProvider)? = nil,
+        /// swift-be0.7 #2: optional history to seed the planner
+        /// with on startup. Used by `--resume <id> -p "task"
+        /// --agents …` so the multi-agent run has the loaded
+        /// session as prior context (the planner's plan is
+        /// informed by what was said before; the coder's loop
+        /// starts fresh from the plan). Default nil preserves
+        /// the historical contract: no prior context, pure
+        /// task-to-plan-to-implementation flow.
+        initialConversation: Conversation? = nil
     ) async throws -> String {
         let providerFor: @MainActor (AgentProfile) -> any LLMProvider = providerForProfile ?? { _ in provider }
 
@@ -75,6 +84,9 @@ struct Orchestrator {
         try Task.checkCancellation()
         renderer.phase("Planning")
         let planner = Agent(profile: profiles.planner, provider: providerFor(profiles.planner), tools: tools, renderer: renderer)
+        if let prior = initialConversation, !prior.messages.isEmpty {
+            planner.restore(prior)
+        }
         let plan = try await planner.run("Plan the following task:\n\n\(task)")
         renderer.endAssistant()
 

@@ -18,7 +18,7 @@ import Foundation
 /// A short prefix is also visibly distinct across multiple
 /// sessions in `/sessions` output (the table is sorted newest
 /// first, so the freshest title floats to the top).
-func deriveSessionTitle(from conversation: Conversation, maxLength: Int = 40) -> String {
+nonisolated func deriveSessionTitle(from conversation: Conversation, maxLength: Int = 40) -> String {
     for message in conversation.messages {
         if case .user(let text) = message {
             let trimmed = text
@@ -75,7 +75,7 @@ enum SessionResolution {
 /// to `store.mostRecent()` before calling this helper). The
 /// "list" path (`/sessions`) bypasses this helper entirely and
 /// calls `store.list()` directly.
-func resolveSession(idOrPrefix: String, store: SessionStore) -> SessionResolution {
+nonisolated func resolveSession(idOrPrefix: String, store: SessionStore) -> SessionResolution {
     let needle = idOrPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !needle.isEmpty else { return .notFound }
 

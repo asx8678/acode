@@ -109,14 +109,27 @@ struct Acode: AsyncParsableCommand {
         return "Anthropic"
     }
 
-    @MainActor
+    // swift-be0.7 #5: `run()` is no longer `@MainActor`. The
+    // previous annotation was a *consequence* of `resolveStartupSession`
+    // being marked `@MainActor` (incorrectly — `SessionStore` is
+    // `Sendable`/synchronous). Now that `SessionStore` is `nonisolated`
+    // and `resolveStartupSession` is too, `run()` can drop the
+    // MainActor isolation. The downstream entry points it calls
+    // (`runTUISession`, `runREPL`, `executeOneShot`,
+    // `executeOrchestrated`) are still `@MainActor` and the
+    // `await` calls automatically hop the actor as needed.
     mutating func run() async throws {
         // swift-be0.4: resolve any `--resume` / `--continue` into a
         // concrete `Session` (or fail fast). `--resume` takes
         // precedence over `--continue` because it is more specific.
         // The resolution is non-fatal on miss: we just log and
         // continue with no session so the user gets the regular
-        // startup path with a "no such session" notice.
+        // startup path with a "no such session" notice. Now
+        // `resolveStartupSession` is `nonisolated` (swift-be0.7
+        // #5: `SessionStore` is `Sendable`/synchronous, so the
+        // directory walk it does on miss doesn't need the main
+        // actor). Called synchronously from the non-isolated
+        // `run()` for the same reason.
         let startupSession: Session? = try Self.resolveStartupSession(
             resume: resume,
             continueLast: continueLast
@@ -184,11 +197,14 @@ struct Acode: AsyncParsableCommand {
     /// genuinely-broken-args cases (empty `--resume ""`); those
     /// are user mistakes we want to surface, not silently ignore.
     ///
-    /// MainActor-isolated because `SessionStore` is itself
-    /// MainActor-isolated (file I/O lives on the main actor in
-    /// the Wave A design).
-    @MainActor
-    private static func resolveStartupSession(
+    /// `nonisolated` because `SessionStore` is a `Sendable`
+    /// synchronous struct — file I/O does not require the main
+    /// actor, and the directory walk in `list()` (used by the
+    /// title/prefix resolution paths) shouldn't run on the main
+    /// actor at startup. `FileHandle.standardError.write` is
+    /// documented as thread-safe, so the diagnostic output here
+    /// is also safe from any isolation.
+    private nonisolated static func resolveStartupSession(
         resume: String?,
         continueLast: Bool
     ) throws -> Session? {
@@ -518,6 +534,13 @@ struct Acode: AsyncParsableCommand {
     ) {
         let nameArg: String? = args.isEmpty ? nil : args
         let history = agent.history
+        // swift-be0.7 #9: refuse to save an empty conversation.
+        // Mirrors `CommandHandler.handleSave` so the two
+        // surfaces stay in parity.
+        if history.messages.isEmpty {
+            print("Nothing to save: conversation is empty. Send a message or /resume a session first.")
+            return
+        }
         let title = nameArg ?? deriveSessionTitle(from: history)
         let now = Date()
         let session: Session
@@ -914,7 +937,18 @@ struct Acode: AsyncParsableCommand {
         let finalProfiles = orchestratorProfiles(agents: agents, cfg: cfg)
 
         let orchestrator = Orchestrator()
-        return try await orchestrator.run(
+        // swift-be0.7 #2: when a `--resume` / `--continue` session
+        // was loaded, pre-seed the orchestrator's planner agent
+        // with the loaded history (PREFERRED path: restore the
+        // loaded history into the orchestrator's primary agent
+        // and save back on success). The coder/reviewer loops
+        // start fresh from the plan, which keeps the
+        // plan-then-implement flow intact; only the planner
+        // has prior context. The session is also updated in
+        // place after a successful run (user task + final
+        // answer appended) so a subsequent `--continue`
+        // surfaces the new turn.
+        let result = try await orchestrator.run(
             task: prompt,
             provider: provider,
             tools: tools,
@@ -923,8 +957,27 @@ struct Acode: AsyncParsableCommand {
             // Resolve a provider per role so a role's model override can target a
             // different provider than the top-level default. Roles without an
             // override fall back to the CLI/config model.
-            providerForProfile: { profile in makeProvider(model: profile.model ?? model, cfg: cfg) }
+            providerForProfile: { profile in makeProvider(model: profile.model ?? model, cfg: cfg) },
+            initialConversation: startupSession?.conversation
         )
+        // Save back on success: append the user task and the
+        // orchestrator's final answer to the loaded session so
+        // a follow-up `--continue` (or `/sessions`) shows the
+        // new turn. Mirror `executeOneShot`'s in-place update
+        // pattern. The two appended messages form a minimal
+        // round-trip; the intermediate plan/coder/review
+        // dialogue is intentionally NOT persisted (those
+        // messages are ephemeral by design and would bloat the
+        // session JSON).
+        if var session = startupSession {
+            var convo = session.conversation
+            convo.append(.user(prompt))
+            convo.append(.assistant(text: result, toolCalls: []))
+            session.conversation = convo
+            session.updatedAt = Date()
+            SessionStore.default.save(session)
+        }
+        return result
     }
 
     /// Applies a per-role model override from `Config.roleModels` to a profile.
