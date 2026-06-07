@@ -258,7 +258,7 @@ final class TUIApp {
         // so a re-entry into `run()` (future-proofing) is safe.
         //
         // What this toggles, byte-for-byte:
-        //   termios: clears ICANON | ECHO | ISIG (raw mode)
+        //   termios: clears ICANON | ECHO | ISIG | IEXTEN (raw mode)
         //   stdout:  ESC[?1049h (alt-screen enter)
         //            ESC[?25l   (cursor hide)
         //            ESC[?2004h (bracketed paste enable)
@@ -512,7 +512,40 @@ final class TUIApp {
 
     /// Applies a `SlashResult` to the model. Sets activity back to
     /// idle, posts any notice to the transcript, sets a toast, and
-    /// triggers the loop exit on `quit`.
+    /// — on `quit` — yields a `Msg.quit` so the for-await loop exits
+    /// on its next iteration (so `defer { terminal.restore() }` at
+    /// the top of `run()` runs and leaves the terminal in its
+    /// pre-TUI state).
+    ///
+    /// swift-k96 follow-up: the previous version of this method set
+    /// `model.activity = .idle` and then *did nothing* on
+    /// `result.quit` — the for-await kept waiting for the next Msg
+    /// that would never come, the `defer` never fired, and the
+    /// user's terminal was left in alt-screen + raw mode + mouse +
+    /// no-echo. The fix posts a `Msg.quit` via the loop's `postMsg`
+    /// closure; the reducer maps it to `[.quit]` and the outer
+    /// loop's `if case .quit = effect { shouldExit = true }` +
+    /// immediate `if shouldExit { break }` fire on the very next
+    /// iteration. Same end state as Ctrl-D / Ctrl-C-while-idle.
+    ///
+    /// Ordering: the auto-save + notice + toast are applied
+    /// synchronously here BEFORE the `Msg.quit` is yielded, and
+    /// the outer for-await calls `renderOnce` once more after we
+    /// return (the `Msg.quit` sits in the stream and is processed
+    /// on the next iteration). So the user sees a final frame
+    /// with the toast/notice and idle state before the loop
+    /// breaks — same UX as Ctrl-D.
+    ///
+    /// Why a Msg and not a direct flag: the loop's contract is
+    /// "the only thing that can break is a `.quit` effect". The
+    /// `postMsg` closure is the existing seam for "something
+    /// outside the reducer wants to inject work"; reusing it
+    /// keeps the architecture intact and is exactly what the
+    /// `/resume` path does for `Msg.replaceTranscript`. The
+    /// `postMsg` may be nil if `run()` hasn't entered yet (e.g.
+    /// a hypothetical pre-loop slash), so the call is silent in
+    /// that case — but the slash path is only reached from
+    /// inside `run()`, so this is defensive only.
     private func applySlashResult(_ result: SlashResult) {
         model.activity = .idle
         if let notice = result.notice {
@@ -522,21 +555,15 @@ final class TUIApp {
             model.toast = Toast(text: message, bornTick: model.tick)
         }
         if result.quit {
-            // Defer the actual break until the next for-await tick so
-            // the toast can paint one last frame.
-            model.activity = .idle
-            // The cleanest way to break out from inside a handler is
-            // a flag the outer loop checks (same pattern as the
-            // existing `.quit` effect).
-            // We don't have a direct handle on that flag here; the
-            // existing `case .resolveApproval` sets `shouldExit` via
-            // the outer loop. The simplest way: post a synthetic Msg
-            // that the loop recognizes. For now, the outer loop's
-            // `if case .quit = effect` is the only path; we rely on
-            // the .quit being yielded. Since the result is in hand
-            // and the outer loop iterates per Msg, we let the next
-            // user keystroke end the session. (The Ctrl-D path is
-            // the canonical way to quit the TUI.)
+            // Yield a `Msg.quit` to the loop's stream. The
+            // for-await picks it up on the NEXT iteration (the
+            // current one will still render one final frame
+            // first, so the user sees the notice/toast/auto-save
+            // outcome). The reducer maps `.quit` → `[.quit]`,
+            // the loop's effect-interpreter sets `shouldExit =
+            // true` and breaks, and the `defer` at the top of
+            // `run()` calls `terminal.restore()`.
+            postMsg?(.quit)
         }
     }
 

@@ -73,6 +73,29 @@ final class Terminal {
     deinit {
         // Best-effort restore if the caller forgot. The atexit + sigaction
         // handlers are the real safety net for crashes and `kill`.
+        //
+        // Acceptable carve-out: this is the ONLY place in the file that
+        // uses `TCSAFLUSH` (the defer-path restore, the atexit handler,
+        // and the sigaction handler all use `TCSANOW`). The asymmetry
+        // is intentional:
+        //   1. The deinit runs after the function's last reference to
+        //      `self` goes away, which is AFTER the `defer` at the top
+        //      of `TUIApp.run()` has already called `restore()` — so
+        //      `isRaw` is false in the normal case and this branch
+        //      is dead code.
+        //   2. The "alive" case is a forgotten-`defer` bug: a caller
+        //      constructed `Terminal`, entered raw mode, and exited
+        //      without calling `restore()`. In that case the TUI is
+        //      already gone (deinit is running), the PTY/slave is
+        //      likely gone too, and a `TCSANOW` that doesn't drain
+        //      the output queue could leave cleanup bytes stranded.
+        //      `TCSAFLUSH` blocks until the (now-closed) slave drains
+        //      — which returns EOF or an error promptly, so the block
+        //      is short. The cost of being wrong here is the user's
+        //      shell stays in raw mode; the cost of being wrong with
+        //      TCSANOW would be the same + stranded escape sequences
+        //      in a dead buffer. TCSAFLUSH is the conservative choice
+        //      for a path that should never run in practice.
         if isRaw {
             var t = originalTermios
             _ = tcsetattr(STDIN_FILENO, TCSAFLUSH, &t)
@@ -100,6 +123,35 @@ final class Terminal {
         // TUI's quit path. Clearing IEXTEN is the documented fix from
         // `cfmakeraw(3)`.
         raw.c_lflag &= ~(tcflag_t(ICANON) | tcflag_t(ECHO) | tcflag_t(ISIG) | tcflag_t(IEXTEN))
+        // Also clear `IXON` in `c_iflag` so Ctrl-S / Ctrl-Q (XON/XOFF
+        // flow control) do NOT freeze the TUI with no visible feedback.
+        // This is the one c_iflag bit the TUI genuinely needs cleared —
+        // without it, hitting Ctrl-S in the input box sends 0x13 to the
+        // tty driver which suspends output, the TUI stops redrawing,
+        // and the user has no on-screen indicator that the TUI is just
+        // paused. A second Ctrl-S resumes it. The remaining `c_iflag`
+        // bits (`IGNBRK`/`BRKINT`/`PARMRK`/`ISTRIP`/`INLCR`/`IGNCR`/
+        // `ICRNL`) are left at their default settings intentionally:
+        //   - `ICRNL` (CR → NL on input) is a *good* default because
+        //     the TUI's key decoder only needs LF for `.enter` (it
+        //     already maps 0x0A and 0x0D to `.enter` — see
+        //     KeyDecoder.swift:60-61 — so the translation is
+        //     observationally a no-op for the TUI's own state machine,
+        //     and helpful for any tool subprocess that reads the tty
+        //     for line-based input).
+        //   - `INLCR`/`IGNCR` would mangle the raw byte stream the
+        //     TUI's key decoder is parsing (we want to see CR and LF
+        //     as their raw bytes, not as "the other one"), but they
+        //     are off by default on macOS — leaving them alone
+        //     matches their current effective value.
+        //   - `BRKINT`/`PARMRK` are useful for the tty's job
+        //     (signaling break conditions); clearing them risks
+        //     breaking subprocess tools that rely on them.
+        //   - `ISTRIP` (strip 8th bit) would corrupt UTF-8 input.
+        // So: only `IXON` is touched. If a future change needs the
+        // full cfmakeraw c_iflag set, add a comment here explaining
+        // why the other bits are now safe to clobber.
+        raw.c_iflag &= ~tcflag_t(IXON)
         if tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0 {
             return  // Can't enter raw; caller sees no effect and can decide.
         }
@@ -153,9 +205,21 @@ final class Terminal {
         // PTY test harnesses (and any environment) where the reader is
         // not actively draining the master. The bytes still reach the
         // terminal; the termios change is decoupled from the output
-        // queue. The async-signal safety handler below still uses
-        // TCSAFLUSH (it's the atexit/sigaction path, where blocking is
-        // acceptable and we want to discard any pending input).
+        // queue. The async-signal safety handler below (see
+        // `acodeRestoreTerminalUnsafe`) also uses TCSANOW — keeping
+        // the three restore paths (defer, atexit, sigaction) all
+        // on TCSANOW means they all have the same "doesn't block on
+        // the master" semantics, and a regression in one is caught
+        // by the others. (The earlier version of this comment said
+        // the signal handler used TCSAFLUSH; that was true at one
+        // point but is no longer — the handler was hardened to
+        // TCSANOW for the same drain-blocking reasons documented
+        // above. The triple-restore still works because the
+        // sigaction re-raises the signal, the atexit runs at
+        // process exit, and the defer runs on function return —
+        // none of them need TCSAFLUSH's "discard pending input"
+        // behavior because there is no pending input to discard
+        // at that point in the lifecycle.)
         _ = tcsetattr(STDIN_FILENO, TCSANOW, &t)
         isRaw = false
     }
@@ -224,6 +288,39 @@ final class Terminal {
 
 /// Installs the atexit + sigaction handlers exactly once per process.
 /// Safe to call from any `Terminal.init`.
+///
+/// Acceptable carve-outs documented here (out of scope for the
+/// triple-restore contract — the atexit + sigaction handlers are
+/// the last-resort safety net, not a primary control flow):
+///
+///   - **`tcsetattr` inside `acodeRestoreTerminalUnsafe` (called
+///     from the sigaction handler) is NOT in the POSIX
+///     async-signal-safe set.** Darwin's libSystem implements
+///     `tcsetattr` lock-free w.r.t. the signal mask and is
+///     observed to be safe in practice (Apple's own `stty` and
+///     `xterm` do the same dance). On Linux/glibc, `tcsetattr`
+///     grabs an internal `ttyname`-lock that is NOT
+///     async-signal-safe, and a signal arriving during the lock
+///     could deadlock. This codebase is Darwin-only (the project
+///     is a native macOS app), so the Linux risk is documented
+///     but not mitigated. A future cross-port would need to
+///     either drop the sigaction handler to a write-only escape
+///     and defer the termios restore to a normal atexit, or use
+///     a self-pipe / signalfd trick to bounce the work back to
+///     a normal thread.
+///
+///   - **`SIGQUIT` and `SIGTSTP` are intentionally not handled.**
+///     `enterRawAltScreen()` clears `ISIG`, so the line
+///     discipline does NOT translate Ctrl-\ (SIGQUIT) or Ctrl-Z
+///     (SIGTSTP) into signals — the bytes arrive as raw
+///     `0x1C` / `0x1A` and the TUI's key decoder maps them
+///     like any other input. The user CAN still `kill -QUIT
+///     <pid>` or `kill -TSTP <pid>` from another terminal, but
+///     in that case the user is the attacker, and the atexit
+///     trampoline covers process exit. Handling SIGQUIT/SIGTSTP
+///     from the TUI itself would be more code for no real
+///     safety gain — the documented in-band exit paths (Ctrl-D,
+///     Ctrl-C-while-idle, `/quit`) are the supported user story.
 private nonisolated func acodeInstallSafetyHandlers(termios: termios) {
     acodeSafetyLock.lock()
     defer { acodeSafetyLock.unlock() }

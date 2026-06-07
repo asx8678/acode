@@ -585,6 +585,164 @@ private final class OutputCapture: @unchecked Sendable {
     }
 }
 
+// MARK: - /quit slash command exit-path test (swift-k96 follow-up)
+//
+// Sibling of the two PTY tests above. The primary happy-path test
+// (`test_tui_live_pty_render`) quits via Ctrl-D on empty input
+// (the for-await's `if case .quit = effect { shouldExit = true }`
+// path), and the abnormal-exit test
+// (`test_tui_live_pty_sigint_restores_terminal`) quits via SIGINT
+// (the atexit/sigaction safety-net path). Neither covered the
+// **slash command** exit path — the path `/quit` takes through
+// `CommandHandler` → `SlashResult.quit == true` → the loop's
+// `applySlashResult` → the `defer { terminal.restore() }`.
+//
+// The previous `swift-k96` fix was INCOMPLETE: `applySlashResult`
+// received a `SlashResult` with `quit == true` and only set
+// `model.activity = .idle` — it never set `shouldExit`, never
+// yielded a `.quit` Msg, never caused the for-await to break.
+// Result: the user's `/quit` would silently hang the TUI
+// (process alive, alt-screen not torn down, terminal in raw
+// mode). The PTY harness never caught this because Ctrl-D is
+// the easy way out and the slash command was never tested.
+//
+// This test exercises the slash path directly: type `/quit\n`
+// into the input box and assert the child exits cleanly with
+// the alt-screen leave sequence. **It must fail on the pre-fix
+// code (child hangs, assertion on exitStatus != nil fails) and
+// pass on the fixed code (the new `Msg.quit` path causes
+// shouldExit to be set, the for-await breaks, defer restores
+// the terminal, process exits 0).** Failure mode on a regression:
+// the test will time out at 3s, `waitExit` returns nil,
+// `killHard()` is invoked, the terminal is left in raw/alt/mouse
+// for the child process which then dies from SIGKILL — same
+// observability profile as the SIGINT test.
+@Test func test_tui_live_pty_slash_quit_exits() throws {
+    // ---- 1. Locate the built product (same as primary + SIGINT tests) ----
+    let cwd = FileManager.default.currentDirectoryPath
+    let debugPath = "\(cwd)/.build/debug/acode"
+    let releasePath = "\(cwd)/.build/release/acode"
+    let productPath: String
+    if FileManager.default.fileExists(atPath: debugPath) {
+        productPath = debugPath
+    } else if FileManager.default.fileExists(atPath: releasePath) {
+        productPath = releasePath
+    } else {
+        Issue.record(
+            "acode executable not found at \(debugPath) nor \(releasePath). Run `swift build` (or `swift build -c release`) before this test."
+        )
+        return
+    }
+    let child = try TuiChild(productPath: productPath)
+    defer { child.killHard() }
+    let capture = OutputCapture()
+
+    // ---- 2. Wait for the first frame (boot OK) ----
+    // Use the same marker the SIGINT test uses (`ESC[2J` from
+    // `ScreenRenderer.fullRepaint`) — it's stable, the wordmark
+    // model label depends on user config which we don't control.
+    let firstFrame = Data("\u{1B}[2J".utf8)
+    let firstFrameTimeout: Double = 3.0
+    let firstFrameStart = Date()
+    var sawFirstFrame = false
+    while Date().timeIntervalSince(firstFrameStart) < firstFrameTimeout {
+        _ = capture.drain(master: child.master, seconds: 0.1)
+        if capture.contains(firstFrame) { sawFirstFrame = true; break }
+    }
+    #expect(sawFirstFrame, "TUI never produced its first frame; got \(capture.count) bytes")
+    if !sawFirstFrame { return }
+
+    // ---- 3. Confirm we entered the alt-screen (sanity) ----
+    let altScreenEnter = Data("\u{1B}[?1049h".utf8)
+    #expect(
+        capture.contains(altScreenEnter),
+        "expected alt-screen enter ESC[?1049h on boot; got \(capture.count) bytes"
+    )
+
+    // ---- 4. Type `/quit` and press Enter ----
+    // 0x2F = '/', 0x71 = 'q', 0x75 = 'u', 0x69 = 'i', 0x74 = 't',
+    // 0x0A = LF (line feed). The TUI's KeyDecoder maps both 0x0A
+    // and 0x0D to `.enter` (see KeyDecoder.swift:60-61), so LF
+    // is fine — it travels through the PTY unmolested because
+    // ICRNL is irrelevant (we're in raw mode with ICRNL default
+    // but no ICRNL/INLCR on the output side; the byte is delivered
+    // to the child as 0x0A and the decoder turns it into `.enter`).
+    //
+    // The TUI's reducer sees the characters, builds the input
+    // "/quit", clears the input on Enter, detects the `/` prefix,
+    // and dispatches `.runSlash("/quit")`. The loop's
+    // `handleEffect(.runSlash)` calls
+    // `commandHandler.run(slashCommand: "/quit")` →
+    // `handleQuit()` → since the test never submitted a prompt
+    // (no LLM call), `agent.history.messages` is empty, so
+    // `hasHistory` is false, no auto-save, and the slash result
+    // is just `SlashResult(quit: true)`. Then `applySlashResult`
+    // sets activity=idle, and — in the FIXED code — posts a
+    // `Msg.quit` to the loop's stream. The reducer maps it to
+    // `[.quit]`, the for-await's `if case .quit = effect`
+    // sets `shouldExit = true`, the immediate
+    // `if shouldExit { break }` fires, the `defer` restores
+    // the terminal, the process exits 0.
+    let slashQuitBytes: [UInt8] = [0x2F, 0x71, 0x75, 0x69, 0x74, 0x0A]
+    child.writeRaw(slashQuitBytes)
+
+    // ---- 5. Wait for clean exit + alt-screen leave sequence ----
+    // Same concurrent-drain pattern as the other two tests —
+    // without it, the alt-screen leave bytes vanish into the
+    // PTY's kernel buffer.
+    let altScreenLeave = Data("\u{1B}[?1049l".utf8)
+    let exitStatus = child.waitExit(timeoutSeconds: 3.0) { master in
+        var scratch = [UInt8](repeating: 0, count: 4096)
+        let n = read(master, &scratch, scratch.count)
+        if n > 0 { capture.appendForDrain(scratch, count: n) }
+    }
+    _ = capture.drain(master: child.master, seconds: 0.5)
+
+    // ---- 6. The critical assertion: /quit actually exits ----
+    // On the BROKEN code (pre-fix), `applySlashResult` only set
+    // `model.activity = .idle` and the for-await kept waiting
+    // forever. The child would never exit voluntarily; the only
+    // way out is our 3s timeout → `killHard()` → process dies
+    // from SIGKILL with the terminal in alt-screen/raw/mouse.
+    // `waitExit` returns nil, this `#expect` fails, the test
+    // fails. The defer on the child handles the cleanup.
+    #expect(
+        exitStatus != nil,
+        "/quit did not exit the TUI within 3s — applySlashResult is not signaling shouldExit (pre-fix bug; see swift-k96 follow-up)"
+    )
+    if let s = exitStatus {
+        // `/quit` is a CLEAN exit (defer → terminal.restore() →
+        // function returns → process exits 0). The status
+        // should be WIFEXITED with code 0. A signal-terminated
+        // child would indicate the cleanup path is broken (the
+        // defer never fired, the atexit/sigaction trampolines
+        // had to take over, or the SIGKILL from the test's
+        // 3s-timeout safety net hit). Any of those is wrong.
+        let exited = (s & 0x7f) == 0
+        let code = (s >> 8) & 0xff
+        #expect(
+            exited && code == 0,
+            "TUI child did not exit cleanly from /quit: raw status=\(s) signal=\(s & 0x7f) code=\(code) (expected a clean WIFEXITED with code 0 — defer terminal.restore() should have fired)"
+        )
+    }
+
+    // ---- 7. Alt-screen leave was emitted ----
+    // Same safety assertion as the other two tests. If the
+    // for-await's break fires correctly, the `defer` at the top
+    // of `run()` writes the cleanup sequence (including
+    // ESC[?1049l). If it doesn't fire (pre-fix bug), the child
+    // hangs, we SIGKILL, and this assertion fails because no
+    // cleanup bytes were ever written.
+    #expect(
+        capture.contains(altScreenLeave),
+        "/quit did not produce alt-screen leave ESC[?1049l — defer terminal.restore() never fired; user would be left in alt-screen. Got \(capture.count) bytes total"
+    )
+
+    if exitStatus == nil {
+        child.killHard()
+    }
+}
+
 // MARK: - SIGINT / Ctrl-C teardown-safety test
 //
 // Sibling of `test_tui_live_pty_render`. The harness's primary

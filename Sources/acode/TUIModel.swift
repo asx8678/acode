@@ -288,6 +288,26 @@ enum Msg: Sendable {
     /// (and from `--resume`/`--continue` startup). The reducer is
     /// a pure assignment; the next frame paints the new history.
     case replaceTranscript([TranscriptItem], model: String?)
+    /// Request a clean loop exit. Posted by `TUIApp.applySlashResult`
+    /// when a slash command returns `SlashResult.quit == true` (e.g.
+    /// `/quit`, `/q`, `/exit`). The reducer maps this to a `.quit`
+    /// Effect so the outer for-await loop's
+    /// `if case .quit = effect { shouldExit = true }` + immediate
+    /// `if shouldExit { break }` fire on the NEXT iteration — the
+    /// SAME path that Ctrl-D (empty input) and Ctrl-C (idle) take.
+    /// Routing `/quit` through this Msg is the bug fix for
+    /// `swift-k96` follow-up: previously the slash handler just set
+    /// `model.activity = .idle` and never set `shouldExit`, so the
+    /// for-await blocked forever and the `defer { terminal.restore() }`
+    /// at the top of `run()` never fired — the user was left
+    /// stranded in alt-screen + raw mode + mouse + no-echo. Posting
+    /// a synthetic Msg to the stream (vs. trying to set a flag
+    /// directly) keeps the loop's contract intact: the only writer
+    /// to the model is the reducer; the only thing that can break
+    /// the loop is a `.quit` effect. We do it on the NEXT loop
+    /// iteration so the notice/toast/auto-save applied by
+    /// `applySlashResult` get one final render pass.
+    case quit
 }
 
 // MARK: - Effect
@@ -510,6 +530,25 @@ func update(_ m: inout TUIModel, _ msg: Msg) -> [Effect] {
             m.startup = false
         }
         return []
+
+    case .quit:
+        // Posted by `TUIApp.applySlashResult` on a `SlashResult.quit`
+        // (`/quit`, `/q`, `/exit`). The reducer is pure, so it
+        // can't set the loop's `shouldExit` flag directly — it
+        // surfaces a canonical `.quit` Effect and the outer
+        // for-await loop's
+        // `if case .quit = effect { shouldExit = true }` + the
+        // immediate `if shouldExit { break }` fire. This is the
+        // SAME effect Ctrl-D (empty input) and Ctrl-C (idle) emit,
+        // so the cleanup path (`defer { terminal.restore() }` →
+        // ESC[?1049l + termios restore → process exit 0) is
+        // identical regardless of how the user asked to leave.
+        // No model mutation needed: the slash handler already
+        // set activity=idle, posted the notice, and set the toast
+        // BEFORE yielding this Msg, so the final frame the loop
+        // renders before the break shows the user a clean "we got
+        // your request, here's what we did" state.
+        return [.quit]
     }
 }
 
