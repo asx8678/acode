@@ -99,7 +99,7 @@ private func assertPairsIntact(_ messages: [Message]) {
     )
 
     #expect(store.save(original))
-    #expect(FileManager.default.fileExists(atPath: store.url(for: "roundtrip-1").path))
+    #expect(FileManager.default.fileExists(atPath: store.url(for: "roundtrip-1")!.path))
 
     guard let loaded = store.load(id: "roundtrip-1") else {
         Issue.record("Expected load to return a session")
@@ -254,7 +254,7 @@ private func assertPairsIntact(_ messages: [Message]) {
         updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
     )
     #expect(store.save(session))
-    #expect(FileManager.default.fileExists(atPath: store.url(for: "deep").path))
+    #expect(FileManager.default.fileExists(atPath: store.url(for: "deep")!.path))
 }
 
 @Test func test_sessionstore_save_overwrites_existing() {
@@ -285,6 +285,112 @@ private func assertPairsIntact(_ messages: [Message]) {
     #expect(loaded.updatedAt == v2.updatedAt)
 
     // The .bak from the first save should exist.
-    let bakURL = URL(fileURLWithPath: store.url(for: "evolving").path + ".bak")
+    let bakURL = URL(fileURLWithPath: store.url(for: "evolving")!.path + ".bak")
     #expect(FileManager.default.fileExists(atPath: bakURL.path))
+}
+
+// MARK: - Security: path-traversal guard (swift-be0.7 fix-up #1)
+//
+// `SessionStore.url(for:)` is the seam between a user-supplied
+// session id (from `--resume <input>`, `/resume <input>`, or a
+// loaded JSON `id` field) and the filesystem. A crafted id must
+// not be able to escape `baseDir` or create a subdirectory
+// hierarchy. These tests pin the contract.
+
+@Test func test_sessionstore_url_sanitizes_traversal_sequences() {
+    // `../../evil` is the canonical path-traversal attempt. The
+    // store must rewrite the `..` segments (and any `/`) so the
+    // resulting URL is inside `baseDir`.
+    let (store, dir) = makeTempStore()
+    defer { cleanup(dir) }
+
+    guard let safeURL = store.url(for: "../../evil") else {
+        Issue.record("Expected url(for:) to return a non-nil URL for a traversal id (sanitized to something inside baseDir).")
+        return
+    }
+    #expect(SessionStore.contains(baseDir: dir, url: safeURL))
+    // The unsafe characters must NOT survive: the resulting
+    // filename has no `/` and no `..`.
+    let lastComponent = safeURL.lastPathComponent
+    #expect(!lastComponent.contains("/"))
+    #expect(!lastComponent.contains(".."))
+    #expect(!lastComponent.hasPrefix("."))
+}
+
+@Test func test_sessionstore_save_rejects_traversal_id_without_escaping() {
+    // A save with a traversal id must not produce a file outside
+    // `baseDir` — the resulting URL must be inside `baseDir`
+    // (sanitized), and the session must round-trip through load.
+    let (store, dir) = makeTempStore()
+    defer { cleanup(dir) }
+
+    let session = makeSession(
+        id: "../../malicious",
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    #expect(store.save(session))
+    // The saved file (if any) must be under `baseDir` — not
+    // under the parent of `baseDir` (where `../../` would land).
+    #expect(SessionStore.contains(baseDir: dir, url: dir))
+    // The most common real-world consequence: nothing got
+    // written into the parent of `dir`. The parent is a fresh
+    // temp dir; an escaped file would be a stray JSON in there.
+    let parentContents = (try? FileManager.default.contentsOfDirectory(at: dir.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []
+    let escaped = parentContents.filter { $0.lastPathComponent.hasSuffix(".json") }
+    #expect(escaped.isEmpty, "Expected no session files to escape baseDir; found: \(escaped.map(\.lastPathComponent))")
+}
+
+@Test func test_sessionstore_load_rejects_traversal_id() {
+    // The READ path must apply the same containment guard: a
+    // malicious id yields `nil`, not a file read from outside
+    // the store. (No file actually lives outside the store in
+    // this test — the assertion is that the helper returns nil
+    // for a traversal id rather than e.g. throwing.)
+    let (store, dir) = makeTempStore()
+    defer { cleanup(dir) }
+    #expect(store.load(id: "../../evil") == nil)
+    #expect(store.load(id: "/absolute/path/whatever") == nil)
+    #expect(store.load(id: "ok/relative/with/slashes") == nil)
+    #expect(store.load(id: "") == nil)
+    #expect(store.load(id: ".") == nil)
+    #expect(store.load(id: "..") == nil)
+}
+
+@Test func test_sessionstore_sanitize_id_rejects_dangerous_inputs() {
+    // The sanitization helper is the first line of defense. Pin
+    // its behavior across the common attack shapes.
+    #expect(SessionStore.sanitize(id: "../../etc/passwd") != nil)
+    #expect(SessionStore.sanitize(id: "/absolute/path") != nil)
+    #expect(SessionStore.sanitize(id: "") == nil)
+    #expect(SessionStore.sanitize(id: "   ") == nil)
+    // Hidden files (leading `.`) are rejected outright.
+    #expect(SessionStore.sanitize(id: ".hidden") == nil)
+    // Reserved characters are replaced; the result is non-empty
+    // (assuming the input had any alphanumerics).
+    #expect(SessionStore.sanitize(id: "a:b") == "a_b")
+    #expect(SessionStore.sanitize(id: "a*b") == "a_b")
+}
+
+@Test func test_sessionstore_load_rejects_future_schema_version() {
+    // swift-be0.7 #7: a file with `version` greater than the
+    // current schema is almost certainly a future format this
+    // binary can't safely read. `Session.decoder` must throw,
+    // and the store must surface that as `load(id:) == nil`
+    // (never a partially-decoded value with the wrong shape).
+    let (store, dir) = makeTempStore()
+    defer { cleanup(dir) }
+
+    let futureVersion = Session.currentVersion + 1
+    let json = """
+    {
+      "version": \(futureVersion),
+      "id": "future",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z",
+      "conversation": {"messages": []}
+    }
+    """
+    let url = dir.appendingPathComponent("future.json")
+    try? Data(json.utf8).write(to: url)
+    #expect(store.load(id: "future") == nil)
 }

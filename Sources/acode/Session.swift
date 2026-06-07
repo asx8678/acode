@@ -6,9 +6,13 @@ import Foundation
 /// forward-compatible: a file missing the `version` key loads as
 /// `Session.currentVersion` so older binaries' files keep working. Persistence
 /// and I/O live on `SessionStore`; this type is pure data.
-struct Session: Codable, Identifiable {
+///
+/// `nonisolated` so the file-backed `SessionStore` can encode/decode from
+/// any isolation (the `Codable` conformance is a value-type contract;
+/// the data has no actor affinity).
+nonisolated struct Session: Codable, Identifiable {
     /// Current on-disk schema version. Bump on backwards-incompatible changes.
-    static let currentVersion: Int = 1
+    nonisolated static let currentVersion: Int = 1
 
     let version: Int
     let id: String
@@ -45,6 +49,20 @@ struct Session: Codable, Identifiable {
         // Forward-compat: older files (or hand-rolled fixtures) may omit
         // `version` entirely; treat them as the current schema.
         self.version = try c.decodeIfPresent(Int.self, forKey: .version) ?? Session.currentVersion
+        // Backwards-compat guard: a file with a version NEWER than
+        // this binary knows about is almost certainly a schema this
+        // binary can't safely read. Silently loading it would
+        // either crash downstream (the new schema might have
+        // removed fields we read) or — worse — succeed with
+        // wrong data. Surface a decoding error so the store
+        // returns `nil` and the caller logs/skips the file.
+        if self.version > Session.currentVersion {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version,
+                in: c,
+                debugDescription: "Session schema version \(self.version) is newer than this binary's \(Session.currentVersion); refusing to load."
+            )
+        }
         self.id = try c.decode(String.self, forKey: .id)
         self.title = try c.decodeIfPresent(String.self, forKey: .title)
         self.model = try c.decodeIfPresent(String.self, forKey: .model)
@@ -55,7 +73,7 @@ struct Session: Codable, Identifiable {
 
     /// Build a new session with a fresh UUID and the current timestamp.
     /// Persistence lives in `SessionStore`; this is just the constructor.
-    static func new(title: String? = nil, model: String? = nil) -> Session {
+    nonisolated static func new(title: String? = nil, model: String? = nil) -> Session {
         let now = Date()
         return Session(
             id: UUID().uuidString,
@@ -71,7 +89,7 @@ struct Session: Codable, Identifiable {
 extension Session {
     /// Encoder configured for stable, human-readable session JSON.
     /// ISO 8601 dates + pretty-printed sorted keys for diff-friendly on-disk files.
-    static func encoder() -> JSONEncoder {
+    nonisolated static func encoder() -> JSONEncoder {
         let e = JSONEncoder()
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         e.dateEncodingStrategy = .iso8601
@@ -79,7 +97,7 @@ extension Session {
     }
 
     /// Decoder whose date strategy matches `encoder()`.
-    static func decoder() -> JSONDecoder {
+    nonisolated static func decoder() -> JSONDecoder {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d

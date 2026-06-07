@@ -4,12 +4,12 @@ import Foundation
 
 extension Message {
     /// An approximate token count for this message (~4 characters per token).
-    var tokenEstimate: Int {
+    nonisolated var tokenEstimate: Int {
         max(1, charCount / 4)
     }
 
     /// The approximate character count of this message's content.
-    private var charCount: Int {
+    nonisolated private var charCount: Int {
         switch self {
         case .user(let text):
             return text.count
@@ -24,7 +24,7 @@ extension Message {
     ///
     /// Tool-call arguments are never truncated (doing so could corrupt JSON);
     /// only free-text and tool-result output are trimmed.
-    func truncated(to budget: Int) -> Message {
+    nonisolated func truncated(to budget: Int) -> Message {
         guard tokenEstimate > budget else { return self }
         let charBudget = max(4, budget * 4)
 
@@ -53,7 +53,7 @@ extension Message {
     }
 
     /// Clips `text` to at most `charBudget` characters, appending a marker when truncated.
-    private static func clip(_ text: String, to charBudget: Int) -> String {
+    nonisolated private static func clip(_ text: String, to charBudget: Int) -> String {
         guard text.count > charBudget else { return text }
         let marker = "…[truncated]"
         guard charBudget > marker.count else {
@@ -66,7 +66,7 @@ extension Message {
 
 extension JSONValue {
     /// The character count of this value's JSON encoding (best-effort).
-    var encodedCharCount: Int {
+    nonisolated var encodedCharCount: Int {
         guard let data = try? JSONEncoder().encode(self),
             let string = String(data: data, encoding: .utf8)
         else {
@@ -79,7 +79,7 @@ extension JSONValue {
 // MARK: - Conversation
 
 /// The running message history for an agent turn.
-struct Conversation: Codable {
+nonisolated struct Conversation: Codable {
     private(set) var messages: [Message] = []
 
     private enum CodingKeys: String, CodingKey {
@@ -114,7 +114,7 @@ struct Conversation: Codable {
     ///    splitting one half off, which step 5 would then drop — leaving an
     ///    empty list that both provider APIs reject.
     /// 5. Drop any orphaned tool_use/tool_result pairs so invariant B2 holds.
-    func compacted(for window: Int) -> [Message] {
+    nonisolated func compacted(for window: Int) -> [Message] {
         guard window > 0 else { return ensureToolPairsIntact(messages) }
 
         let reserve = window * 7 / 10
@@ -168,7 +168,7 @@ struct Conversation: Codable {
     /// An assistant message carrying tool calls must be followed by the matching
     /// `.toolResults`; a `.toolResults` message must be preceded by an assistant
     /// message that requested those calls. Any message violating this is removed.
-    private func ensureToolPairsIntact(_ kept: [Message]) -> [Message] {
+    private nonisolated func ensureToolPairsIntact(_ kept: [Message]) -> [Message] {
         var result: [Message] = []
         result.reserveCapacity(kept.count)
 
